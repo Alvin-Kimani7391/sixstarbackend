@@ -70,6 +70,12 @@ const Buyer = User.discriminator(
   new Schema({
     address: { type: String },
     savedLocations: [{ type: String }],
+    recentlyViewed: [
+      {
+        product: { type: Schema.Types.ObjectId, ref: 'Product' },
+        viewedAt: { type: Date, default: Date.now },
+      },
+    ],
   })
 );
 

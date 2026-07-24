@@ -19,5 +19,7 @@ router.get('/track', trackOrderPublic);
 
 router.get('/:id', protect, getOrderById);
 router.patch('/:id/status', protect, authorize('wholesaler', 'retailer', 'admin'), updateOrderStatus);
+// routes/orderRoutes.js — add
+router.patch('/:id/cancel', protect, cancelOrder);
 
 module.exports = router;
