@@ -7,6 +7,7 @@ const {
   getOrderById,
   getSellerOrders,
   updateOrderStatus,
+  cancelOrder, // ✅ Already imported
 } = require('../controllers/orderController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 

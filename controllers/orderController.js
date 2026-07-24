@@ -201,4 +201,53 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   res.json({ success: true, order });
 });
 
-module.exports = { createOrder, getMyOrders, trackOrderPublic, getOrderById, getSellerOrders, updateOrderStatus };
+// controllers/orderController.js — add this export
+// controllers/orderController.js — corrected cancelOrder
+const cancelOrder = asyncHandler(async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  
+  if (!order) {
+    res.status(404);
+    throw new Error('Order not found');
+  }
+  
+  // Check if the logged-in user owns this order (buyer) or is admin
+  if (order.buyer.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+    res.status(403);
+    throw new Error('Not authorized to cancel this order');
+  }
+  
+  // Check if order can be cancelled
+  // An order can only be cancelled if it's still processing and payment hasn't been confirmed
+  if (order.paymentStatus === 'confirmed' && order.orderStatus !== 'processing') {
+    res.status(400);
+    throw new Error(`Order cannot be cancelled - it has already been ${order.orderStatus}`);
+  }
+  
+  // If payment is confirmed and order is shipped or delivered, cannot cancel
+  if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered') {
+    res.status(400);
+    throw new Error(`Order cannot be cancelled - it has already been ${order.orderStatus}`);
+  }
+  
+  // Update order status to cancelled
+  order.orderStatus = 'cancelled';
+  await order.save();
+  
+  // Optionally restore product stock since we decremented it during order creation
+  for (const item of order.items) {
+    await Product.findByIdAndUpdate(
+      item.product, 
+      { $inc: { stock: item.quantity } }
+    );
+  }
+  
+  res.json({ 
+    success: true, 
+    message: 'Order cancelled successfully',
+    order 
+  });
+});
+
+
+module.exports = { createOrder, getMyOrders, trackOrderPublic, getOrderById, getSellerOrders, updateOrderStatus, cancelOrder };
