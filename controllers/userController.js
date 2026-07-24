@@ -1,5 +1,5 @@
 const asyncHandler = require('express-async-handler'); // or your own try/catch wrapper
-const { User } = require('../models/user');
+const { User } = require('../models/User');
 
 // @desc  Get logged-in user's profile
 // @route GET /api/users/profile
