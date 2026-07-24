@@ -18,7 +18,7 @@ const {
 } = require('../controllers/adminController');
 const { getAllAdsAdmin } = require('../controllers/adController');
 const { getAllCategoriesAdmin } = require('../controllers/categoryController');
-const { getAllAgentsAdmin } = require('../controllers/agentController');
+const { getAllAgentsAdmin } = require('../controllers/agentcontroller');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages } = require('../middleware/uploadMiddleware');
 

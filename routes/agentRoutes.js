@@ -1,9 +1,11 @@
+// agentRoutes.js
 const express = require('express');
 const router = express.Router();
-const { getActiveAgents, createAgent, updateAgent, deleteAgent } = require('../controllers/agentController');
+const { getActiveAgents, getAllAgentsAdmin, createAgent, updateAgent, deleteAgent } = require('../controllers/agentcontroller');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
 router.get('/', getActiveAgents);
+router.get('/admin/all', protect, authorize('admin'), getAllAgentsAdmin); // ← added
 router.post('/', protect, authorize('admin'), createAgent);
 router.put('/:id', protect, authorize('admin'), updateAgent);
 router.delete('/:id', protect, authorize('admin'), deleteAgent);
