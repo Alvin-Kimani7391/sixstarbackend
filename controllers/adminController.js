@@ -3,6 +3,131 @@ const Product = require('../models/Product');
 const Order = require('../models/Order');
 const { User } = require('../models/User');
 
+// @desc    Get ALL products regardless of status - the main dashboard product table
+// @route   GET /api/admin/products?status=active&search=phone&page=1&limit=20
+// @access  Private (admin)
+const getAllProductsAdmin = asyncHandler(async (req, res) => {
+  const { status, search, category, page = 1, limit = 20 } = req.query;
+
+  const filter = {};
+  if (status) filter.status = status;
+  if (category) filter.category = category;
+  if (search) filter.name = { $regex: search, $options: 'i' };
+
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const [products, total] = await Promise.all([
+    Product.find(filter)
+      .populate('category', 'name')
+      .populate('seller', 'name businessName shopName role email phone')
+      .sort('-createdAt')
+      .skip(skip)
+      .limit(Number(limit)),
+    Product.countDocuments(filter),
+  ]);
+
+  res.json({
+    success: true,
+    count: products.length,
+    total,
+    page: Number(page),
+    pages: Math.ceil(total / Number(limit)),
+    products,
+  });
+});
+
+// @desc    Admin fully edits ANY field on ANY product, regardless of status
+//          (name, description, category, stock, sellerPrice, finalPrice,
+//          discountPercent, isHotDeal, and optionally replaces images)
+// @route   PATCH /api/admin/products/:id
+// @access  Private (admin)
+const adminUpdateProduct = asyncHandler(async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (!product) {
+    res.status(404);
+    throw new Error('Product not found');
+  }
+
+  const editableFields = [
+    'name',
+    'description',
+    'category',
+    'stock',
+    'sellerPrice',
+    'finalPrice',
+    'discountPercent',
+    'isHotDeal',
+  ];
+  editableFields.forEach((field) => {
+    if (req.body[field] !== undefined) product[field] = req.body[field];
+  });
+
+  // Admin can replace product images too (uploaded via the same multer/Cloudinary middleware)
+  if (req.files && req.files.length > 0) {
+    product.images = req.files.map((file) => file.path);
+  }
+
+  await product.save();
+  res.json({ success: true, product });
+});
+
+// @desc    Admin reverses a suspension, putting a product back on the storefront
+// @route   PATCH /api/admin/products/:id/reactivate
+// @access  Private (admin)
+const reactivateProduct = asyncHandler(async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (!product) {
+    res.status(404);
+    throw new Error('Product not found');
+  }
+  if (product.status !== 'suspended') {
+    res.status(400);
+    throw new Error('Only suspended products can be reactivated');
+  }
+  product.status = 'active';
+  await product.save();
+  res.json({ success: true, message: 'Product reactivated', product });
+});
+
+// @desc    Admin permanently removes a product from the platform (soft delete)
+// @route   DELETE /api/admin/products/:id
+// @access  Private (admin)
+const adminDeleteProduct = asyncHandler(async (req, res) => {
+  const product = await Product.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+  if (!product) {
+    res.status(404);
+    throw new Error('Product not found');
+  }
+  res.json({ success: true, message: 'Product removed from the platform' });
+});
+
+// @desc    Get ALL orders (any payment/order status) - full order oversight
+// @route   GET /api/admin/orders?paymentStatus=confirmed&orderStatus=processing
+// @access  Private (admin)
+const getAllOrdersAdmin = asyncHandler(async (req, res) => {
+  const { paymentStatus, orderStatus, page = 1, limit = 20 } = req.query;
+
+  const filter = {};
+  if (paymentStatus) filter.paymentStatus = paymentStatus;
+  if (orderStatus) filter.orderStatus = orderStatus;
+
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const [orders, total] = await Promise.all([
+    Order.find(filter).populate('buyer', 'name phone email').sort('-createdAt').skip(skip).limit(Number(limit)),
+    Order.countDocuments(filter),
+  ]);
+
+  res.json({
+    success: true,
+    count: orders.length,
+    total,
+    page: Number(page),
+    pages: Math.ceil(total / Number(limit)),
+    orders,
+  });
+});
+
 // @desc    Get all products awaiting admin review (status = pending_review)
 // @route   GET /api/admin/products/pending
 // @access  Private (admin)
@@ -167,6 +292,11 @@ const setUserStatus = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  getAllProductsAdmin,
+  adminUpdateProduct,
+  reactivateProduct,
+  adminDeleteProduct,
+  getAllOrdersAdmin,
   getPendingProducts,
   approveProduct,
   rejectProduct,

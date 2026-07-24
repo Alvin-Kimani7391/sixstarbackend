@@ -9,6 +9,14 @@ const getCategories = asyncHandler(async (req, res) => {
   res.json({ success: true, count: categories.length, categories });
 });
 
+// @desc    Get ALL categories including inactive ones - for the admin dashboard
+// @route   GET /api/admin/categories
+// @access  Private (admin)
+const getAllCategoriesAdmin = asyncHandler(async (req, res) => {
+  const categories = await Category.find().sort('name');
+  res.json({ success: true, count: categories.length, categories });
+});
+
 // @desc    Admin creates a category
 // @route   POST /api/categories
 // @access  Private (admin)
@@ -59,4 +67,4 @@ const deleteCategory = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Category removed' });
 });
 
-module.exports = { getCategories, createCategory, updateCategory, deleteCategory };
+module.exports = { getCategories, getAllCategoriesAdmin, createCategory, updateCategory, deleteCategory };
