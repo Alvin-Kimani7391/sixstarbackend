@@ -1,7 +1,7 @@
 // agentRoutes.js
 const express = require('express');
 const router = express.Router();
-const { getActiveAgents, getAllAgentsAdmin, createAgent, updateAgent, deleteAgent } = require('../controllers/agentcontroller');
+const { getActiveAgents, getAllAgentsAdmin, createAgent, updateAgent, deleteAgent } = require('../controllers2/agentController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
 router.get('/', getActiveAgents);
