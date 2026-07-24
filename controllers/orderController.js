@@ -1,12 +1,13 @@
 const asyncHandler = require('express-async-handler');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
+const Agent = require('../models/Agent');
 
 // @desc    Buyer places an order and pastes their M-Pesa confirmation message
 // @route   POST /api/orders
 // @access  Private (buyer)
 const createOrder = asyncHandler(async (req, res) => {
-  const { items, shippingAddress, mpesaMessage } = req.body;
+  const { items, shippingAddress, mpesaMessage, agentCode } = req.body;
 
   if (!items || items.length === 0) {
     res.status(400);
@@ -45,6 +46,19 @@ const createOrder = asyncHandler(async (req, res) => {
     });
   }
 
+  // Optional: buyer picked an agent at checkout - validate the code and work out their commission
+  let agentDoc = null;
+  let commissionAmount = 0;
+
+  if (agentCode && agentCode.trim()) {
+    agentDoc = await Agent.findOne({ code: agentCode.trim().toUpperCase(), isActive: true });
+    if (!agentDoc) {
+      res.status(400);
+      throw new Error('Invalid or inactive agent code');
+    }
+    commissionAmount = Math.round((totalAmount * agentDoc.commissionRate) / 100);
+  }
+
   const order = await Order.create({
     buyer: req.user._id,
     items: orderItems,
@@ -52,11 +66,22 @@ const createOrder = asyncHandler(async (req, res) => {
     shippingAddress,
     mpesaMessage,
     paymentStatus: 'pending_verification',
+    agent: agentDoc ? agentDoc._id : null,
+    agentCode: agentDoc ? agentDoc.code : '',
+    commissionAmount,
   });
 
   // Decrement stock immediately to prevent overselling while payment is being verified
   for (const item of items) {
     await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -item.quantity } });
+  }
+
+  // Credit the agent's running totals (commission is only "earned" once payment is confirmed in
+  // practice, but we track it against the order now and admin verifies payment separately anyway)
+  if (agentDoc) {
+    await Agent.findByIdAndUpdate(agentDoc._id, {
+      $inc: { totalOrders: 1, totalCommission: commissionAmount },
+    });
   }
 
   res.status(201).json({
@@ -72,6 +97,44 @@ const createOrder = asyncHandler(async (req, res) => {
 const getMyOrders = asyncHandler(async (req, res) => {
   const orders = await Order.find({ buyer: req.user._id }).sort('-createdAt');
   res.json({ success: true, count: orders.length, orders });
+});
+
+// @desc    Public order tracking by order ID + the phone number used at checkout
+//          (no login required, mirrors a classic "track my order" page)
+// @route   GET /api/orders/track?orderId=...&phone=...
+// @access  Public
+const trackOrderPublic = asyncHandler(async (req, res) => {
+  const { orderId, phone } = req.query;
+
+  if (!orderId || !phone) {
+    res.status(400);
+    throw new Error('Please provide both the order ID and the phone number used at checkout');
+  }
+
+  let order;
+  try {
+    order = await Order.findById(orderId.trim());
+  } catch {
+    order = null; // invalid ObjectId format
+  }
+
+  if (!order || order.shippingAddress?.phone !== phone.trim()) {
+    res.status(404);
+    throw new Error('No matching order found. Check your order ID and phone number.');
+  }
+
+  // Only return what a tracking page needs - never the buyer's full account data
+  res.json({
+    success: true,
+    order: {
+      id: order._id,
+      items: order.items,
+      totalAmount: order.totalAmount,
+      paymentStatus: order.paymentStatus,
+      orderStatus: order.orderStatus,
+      createdAt: order.createdAt,
+    },
+  });
 });
 
 // @desc    Buyer views a single order of their own
@@ -138,4 +201,4 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   res.json({ success: true, order });
 });
 
-module.exports = { createOrder, getMyOrders, getOrderById, getSellerOrders, updateOrderStatus };
+module.exports = { createOrder, getMyOrders, trackOrderPublic, getOrderById, getSellerOrders, updateOrderStatus };

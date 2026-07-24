@@ -18,6 +18,7 @@ const {
 } = require('../controllers/adminController');
 const { getAllAdsAdmin } = require('../controllers/adController');
 const { getAllCategoriesAdmin } = require('../controllers/categoryController');
+const { getAllAgentsAdmin } = require('../controllers/agentController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages } = require('../middleware/uploadMiddleware');
 
@@ -26,6 +27,9 @@ router.use(protect, authorize('admin'));
 
 // Categories (full list including inactive)
 router.get('/categories', getAllCategoriesAdmin);
+
+// Agents (full list including inactive, with commission stats)
+router.get('/agents', getAllAgentsAdmin);
 
 // Full product oversight - the dashboard's main product table
 router.get('/products', getAllProductsAdmin);

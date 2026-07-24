@@ -60,6 +60,7 @@ app.use('/api/orders', require('./routes/orderRoutes'));
 app.use('/api/reviews', require('./routes/reviewRoutes'));
 app.use('/api/ads', require('./routes/adRoutes'));
 app.use('/api/admin', require('./routes/adminRoutes'));
+app.use('/api/agents', require('./routes/agentRoutes'));
 
 // --- Error handling (must be last) ---
 app.use(notFound);
