@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
+const Counter = require('./Counter');
 
 const orderItemSchema = new Schema(
   {
@@ -15,6 +16,10 @@ const orderItemSchema = new Schema(
 
 const orderSchema = new Schema(
   {
+    // Human-friendly sequential reference, e.g. "ORD-100", "ORD-101", ...
+    // Assigned automatically in the pre('save') hook below.
+    orderNumber: { type: String, unique: true, index: true },
+
     buyer: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     items: { type: [orderItemSchema], required: true },
     totalAmount: { type: Number, required: true },
@@ -53,6 +58,25 @@ orderSchema.pre('validate', function (next) {
   if (this.mpesaMessage && !this.mpesaCode) {
     const match = this.mpesaMessage.match(/\b[A-Z0-9]{10}\b/);
     if (match) this.mpesaCode = match[0];
+  }
+  next();
+});
+
+// Assign a sequential ORD-### number the first time this order is saved.
+// Uses a single atomic $inc on a shared counter doc, so two orders created
+// at the exact same moment can never collide on the same number.
+orderSchema.pre('save', async function (next) {
+  if (this.isNew && !this.orderNumber) {
+    try {
+      const counter = await Counter.findByIdAndUpdate(
+        'orderNumber',
+        { $inc: { seq: 1 } },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
+      this.orderNumber = `ORD-${counter.seq}`;
+    } catch (err) {
+      return next(err);
+    }
   }
   next();
 });

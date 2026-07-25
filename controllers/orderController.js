@@ -70,6 +70,7 @@ const createOrder = asyncHandler(async (req, res) => {
     agentCode: agentDoc ? agentDoc.code : '',
     commissionAmount,
   });
+  // order.orderNumber is set automatically by the pre('save') hook on the model
 
   // Decrement stock immediately to prevent overselling while payment is being verified
   for (const item of items) {
@@ -128,10 +129,12 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
     success: true,
     order: {
       id: order._id,
+      orderNumber: order.orderNumber,
       items: order.items,
       totalAmount: order.totalAmount,
       paymentStatus: order.paymentStatus,
       orderStatus: order.orderStatus,
+      rejectionReason: order.rejectionReason,
       createdAt: order.createdAt,
     },
   });
@@ -164,6 +167,7 @@ const getSellerOrders = asyncHandler(async (req, res) => {
   // Only surface this seller's own line items, not the whole cart
   const filtered = orders.map((order) => ({
     _id: order._id,
+    orderNumber: order.orderNumber,
     orderStatus: order.orderStatus,
     createdAt: order.createdAt,
     shippingAddress: order.shippingAddress,
@@ -201,51 +205,52 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   res.json({ success: true, order });
 });
 
-// controllers/orderController.js — add this export
-// controllers/orderController.js — corrected cancelOrder
+// @desc    Buyer (or admin) cancels an order that hasn't shipped yet
+// @route   PATCH /api/orders/:id/cancel
+// @access  Private (buyer who owns the order, or admin)
 const cancelOrder = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id);
-  
+
   if (!order) {
     res.status(404);
     throw new Error('Order not found');
   }
-  
+
   // Check if the logged-in user owns this order (buyer) or is admin
   if (order.buyer.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
     res.status(403);
     throw new Error('Not authorized to cancel this order');
   }
-  
+
   // Check if order can be cancelled
   // An order can only be cancelled if it's still processing and payment hasn't been confirmed
   if (order.paymentStatus === 'confirmed' && order.orderStatus !== 'processing') {
     res.status(400);
     throw new Error(`Order cannot be cancelled - it has already been ${order.orderStatus}`);
   }
-  
+
   // If payment is confirmed and order is shipped or delivered, cannot cancel
   if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered') {
     res.status(400);
     throw new Error(`Order cannot be cancelled - it has already been ${order.orderStatus}`);
   }
-  
+
   // Update order status to cancelled
   order.orderStatus = 'cancelled';
   await order.save();
-  
+
   // Optionally restore product stock since we decremented it during order creation
   for (const item of order.items) {
     await Product.findByIdAndUpdate(
-      item.product, 
+      item.product,
       { $inc: { stock: item.quantity } }
     );
   }
-  
-  res.json({ 
-    success: true, 
+
+  res.json({
+    success: true,
     message: 'Order cancelled successfully',
-    order 
+    order
   });
 });
 
