@@ -1,7 +1,8 @@
 const asyncHandler = require('express-async-handler');
 const Category = require('../models/Category');
+const Product = require('../models/Product');
 
-// @desc    Get all active categories (for navbar, filters, product creation form)
+// @desc    Get all active categories (flat list — for navbar, filters, product creation form)
 // @route   GET /api/categories
 // @access  Public
 const getCategories = asyncHandler(async (req, res) => {
@@ -17,7 +18,54 @@ const getAllCategoriesAdmin = asyncHandler(async (req, res) => {
   res.json({ success: true, count: categories.length, categories });
 });
 
-// @desc    Admin creates a category
+// @desc    Get full category tree (nested) — used by mega-menu, seller category picker
+// @route   GET /api/categories/tree
+// @access  Public
+const getCategoryTree = asyncHandler(async (req, res) => {
+  const categories = await Category.find({ isActive: true }).sort('name').lean();
+  const byId = {};
+  categories.forEach((c) => {
+    c.children = [];
+    byId[c._id.toString()] = c;
+  });
+
+  const roots = [];
+  categories.forEach((c) => {
+    if (c.parentCategory && byId[c.parentCategory.toString()]) {
+      byId[c.parentCategory.toString()].children.push(c);
+    } else if (!c.parentCategory) {
+      roots.push(c);
+    }
+  });
+
+  res.json({ success: true, tree: roots });
+});
+
+// @desc    Get one category by slug, with its direct children + breadcrumb trail
+// @route   GET /api/categories/:slug
+// @access  Public
+const getCategoryBySlug = asyncHandler(async (req, res) => {
+  const category = await Category.findOne({ slug: req.params.slug, isActive: true });
+  if (!category) {
+    res.status(404);
+    throw new Error('Category not found');
+  }
+
+  const children = await Category.find({ parentCategory: category._id, isActive: true }).sort('name');
+
+  // walk up the parentCategory chain to build the breadcrumb trail
+  const breadcrumb = [category];
+  let current = category;
+  while (current.parentCategory) {
+    current = await Category.findById(current.parentCategory);
+    if (!current) break;
+    breadcrumb.unshift(current);
+  }
+
+  res.json({ success: true, category, children, breadcrumb });
+});
+
+// @desc    Admin creates a category (optionally nested under a parent)
 // @route   POST /api/categories
 // @access  Private (admin)
 const createCategory = asyncHandler(async (req, res) => {
@@ -30,11 +78,16 @@ const createCategory = asyncHandler(async (req, res) => {
   const slug = name.toLowerCase().trim().replace(/\s+/g, '-');
   const image = req.file ? req.file.path : '';
 
-  const category = await Category.create({ name, slug, image, parentCategory: parentCategory || null });
+  const category = await Category.create({
+    name,
+    slug,
+    image,
+    parentCategory: parentCategory || null,
+  });
   res.status(201).json({ success: true, category });
 });
 
-// @desc    Admin updates a category
+// @desc    Admin updates a category, including moving it under a different parent
 // @route   PUT /api/categories/:id
 // @access  Private (admin)
 const updateCategory = asyncHandler(async (req, res) => {
@@ -51,20 +104,67 @@ const updateCategory = asyncHandler(async (req, res) => {
   if (req.file) category.image = req.file.path;
   if (req.body.isActive !== undefined) category.isActive = req.body.isActive;
 
+  if (req.body.parentCategory !== undefined) {
+    const newParentId = req.body.parentCategory || null;
+
+    if (newParentId && newParentId === String(category._id)) {
+      res.status(400);
+      throw new Error('A category cannot be its own parent');
+    }
+
+    // prevent creating a cycle (assigning a descendant as the parent)
+    if (newParentId) {
+      let cursor = await Category.findById(newParentId);
+      while (cursor) {
+        if (String(cursor._id) === String(category._id)) {
+          res.status(400);
+          throw new Error('Cannot move a category under one of its own descendants');
+        }
+        cursor = cursor.parentCategory ? await Category.findById(cursor.parentCategory) : null;
+      }
+    }
+
+    category.parentCategory = newParentId;
+  }
+
   await category.save();
   res.json({ success: true, category });
 });
 
-// @desc    Admin deletes (deactivates) a category
+// @desc    Admin deletes (deactivates) a category — blocked if it still has active
+//          subcategories or active products, so nothing gets orphaned.
 // @route   DELETE /api/categories/:id
 // @access  Private (admin)
 const deleteCategory = asyncHandler(async (req, res) => {
-  const category = await Category.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+  const category = await Category.findById(req.params.id);
   if (!category) {
     res.status(404);
     throw new Error('Category not found');
   }
+
+  const childCount = await Category.countDocuments({ parentCategory: category._id, isActive: true });
+  if (childCount > 0) {
+    res.status(400);
+    throw new Error('This category still has active subcategories. Remove or reassign them first.');
+  }
+
+  const productCount = await Product.countDocuments({ category: category._id, isActive: true });
+  if (productCount > 0) {
+    res.status(400);
+    throw new Error('This category still has products assigned to it. Reassign them first.');
+  }
+
+  category.isActive = false;
+  await category.save();
   res.json({ success: true, message: 'Category removed' });
 });
 
-module.exports = { getCategories, getAllCategoriesAdmin, createCategory, updateCategory, deleteCategory };
+module.exports = {
+  getCategories,
+  getAllCategoriesAdmin,
+  getCategoryTree,
+  getCategoryBySlug,
+  createCategory,
+  updateCategory,
+  deleteCategory,
+};
