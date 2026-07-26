@@ -156,20 +156,27 @@ const getOrderById = asyncHandler(async (req, res) => {
   res.json({ success: true, order });
 });
 
-// @desc    Seller (wholesaler/retailer) views orders containing their own products
+// @desc    Seller (wholesaler/retailer) views orders containing their own products.
+//          CHANGED: this used to only return orders once payment was confirmed, which
+//          meant a seller never saw "someone just ordered this" in real time - they only
+//          found out after the admin had verified M-Pesa, sometimes hours later. Sellers
+//          now see the order the moment it's placed, with paymentStatus exposed so they
+//          can tell confirmed sales from ones still awaiting verification.
 // @route   GET /api/orders/seller-orders
 // @access  Private (wholesaler, retailer)
 const getSellerOrders = asyncHandler(async (req, res) => {
-  const orders = await Order.find({ 'items.seller': req.user._id, paymentStatus: 'confirmed' }).sort(
-    '-createdAt'
-  );
+  const orders = await Order.find({ 'items.seller': req.user._id })
+    .populate('buyer', 'name phone')
+    .sort('-createdAt');
 
   // Only surface this seller's own line items, not the whole cart
   const filtered = orders.map((order) => ({
     _id: order._id,
     orderNumber: order.orderNumber,
     orderStatus: order.orderStatus,
+    paymentStatus: order.paymentStatus,
     createdAt: order.createdAt,
+    buyer: order.buyer,
     shippingAddress: order.shippingAddress,
     items: order.items.filter((i) => i.seller.toString() === req.user._id.toString()),
   }));

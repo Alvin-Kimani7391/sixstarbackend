@@ -49,6 +49,13 @@ const orderSchema = new Schema(
       enum: ['processing', 'shipped', 'delivered', 'cancelled'],
       default: 'processing',
     },
+
+    // --- Agent attribution (FIX: these fields were referenced in orderController.js's
+    // createOrder but never declared here, so Mongoose's strict mode silently dropped
+    // them on save. Every order placed with an agent code lost that link on write. ) ---
+    agent: { type: Schema.Types.ObjectId, ref: 'Agent', default: null, index: true },
+    agentCode: { type: String, default: '' },
+    commissionAmount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

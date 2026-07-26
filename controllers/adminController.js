@@ -102,6 +102,9 @@ const adminDeleteProduct = asyncHandler(async (req, res) => {
 });
 
 // @desc    Get ALL orders (any payment/order status) - full order oversight
+//          NOW populates items.product / items.seller / agent so the admin
+//          panel's expandable order row can show buyer, seller-per-item,
+//          agent, and commission without extra round trips.
 // @route   GET /api/admin/orders?paymentStatus=confirmed&orderStatus=processing
 // @access  Private (admin)
 const getAllOrdersAdmin = asyncHandler(async (req, res) => {
@@ -114,7 +117,15 @@ const getAllOrdersAdmin = asyncHandler(async (req, res) => {
   const skip = (Number(page) - 1) * Number(limit);
 
   const [orders, total] = await Promise.all([
-    Order.find(filter).populate('buyer', 'name phone email').sort('-createdAt').skip(skip).limit(Number(limit)),
+    Order.find(filter)
+      .populate('buyer', 'name phone email')
+      .populate('items.product', 'name images')
+      .populate('items.seller', 'name businessName shopName role')
+      .populate('agent', 'name code commissionRate')
+      .populate('verifiedBy', 'name')
+      .sort('-createdAt')
+      .skip(skip)
+      .limit(Number(limit)),
     Order.countDocuments(filter),
   ]);
 

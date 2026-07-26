@@ -1,5 +1,6 @@
 const asyncHandler = require('express-async-handler');
 const Agent = require('../models/Agent');
+const Order = require('../models/Order'); // NEW - needed for getAgentOrders below
 
 // @desc    Get all ACTIVE agents - for the checkout page's agent picker
 // @route   GET /api/agents
@@ -63,4 +64,23 @@ const deleteAgent = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Agent deleted' });
 });
 
-module.exports = { getActiveAgents, getAllAgentsAdmin, createAgent, updateAgent, deleteAgent };
+// @desc    Get every order placed with a specific agent's code - buyer, date,
+//          amount, and commission earned, for the admin panel's expandable
+//          agent row.
+// @route   GET /api/agents/admin/:id/orders
+// @access  Private (admin)
+const getAgentOrders = asyncHandler(async (req, res) => {
+  const agent = await Agent.findById(req.params.id);
+  if (!agent) {
+    res.status(404);
+    throw new Error('Agent not found');
+  }
+
+  const orders = await Order.find({ agent: agent._id })
+    .populate('buyer', 'name phone email')
+    .sort('-createdAt');
+
+  res.json({ success: true, agent, count: orders.length, orders });
+});
+
+module.exports = { getActiveAgents, getAllAgentsAdmin, createAgent, updateAgent, deleteAgent, getAgentOrders };
