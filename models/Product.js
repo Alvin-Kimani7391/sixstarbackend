@@ -1,6 +1,14 @@
 const mongoose = require('mongoose');
 const { Schema } = mongoose;
 
+const productAttributeValueSchema = new Schema(
+  {
+    attribute: { type: Schema.Types.ObjectId, ref: 'Attribute', required: true },
+    value: { type: Schema.Types.Mixed, required: true }, // string, number, boolean, or array (multiselect)
+  },
+  { _id: false }
+);
+
 const productSchema = new Schema(
   {
     seller: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -23,6 +31,16 @@ const productSchema = new Schema(
 
     category: { type: Schema.Types.ObjectId, ref: 'Category', required: true },
 
+    // Product-level attribute values (e.g. Brand: "Nike", Gender: "Unisex").
+    // Attributes flagged isVariantAttribute never appear here - they live on ProductVariant instead.
+    attributes: {
+      type: [productAttributeValueSchema],
+      default: [],
+    },
+
+    // If the category has variant-defining attributes (e.g. Size/Color), this is the
+    // SUM of all variant stock and is kept in sync whenever variants are written.
+    // If the category has none, this is the plain, directly-editable stock count.
     stock: { type: Number, required: true, min: 0, default: 0 },
 
     // --- Pricing / monetization gate ---
@@ -57,6 +75,13 @@ productSchema.virtual('displayPrice').get(function () {
   if (this.finalPrice == null) return null;
   if (!this.discountPercent) return this.finalPrice;
   return Math.round(this.finalPrice * (1 - this.discountPercent / 100));
+});
+
+// Virtual populate: lets us do Product.find().populate('variants') without embedding them
+productSchema.virtual('variants', {
+  ref: 'ProductVariant',
+  localField: '_id',
+  foreignField: 'product',
 });
 
 productSchema.set('toJSON', { virtuals: true });

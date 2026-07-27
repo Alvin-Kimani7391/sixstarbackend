@@ -2,6 +2,8 @@ const asyncHandler = require('express-async-handler');
 const Category = require('../models/Category');
 const Product = require('../models/Product');
 
+const MAX_LEVEL = 2; // 0 = Parent Category, 1 = Category, 2 = Sub Category
+
 // @desc    Get all active categories (flat list — for navbar, filters, product creation form)
 // @route   GET /api/categories
 // @access  Public
@@ -65,6 +67,27 @@ const getCategoryBySlug = asyncHandler(async (req, res) => {
   res.json({ success: true, category, children, breadcrumb });
 });
 
+// Max depth below `categoryId` among its existing descendants (0 if it has no children)
+const getMaxDescendantDepth = async (categoryId, currentDepth = 0) => {
+  const children = await Category.find({ parentCategory: categoryId }).select('_id');
+  if (children.length === 0) return currentDepth;
+  const depths = await Promise.all(
+    children.map((c) => getMaxDescendantDepth(c._id, currentDepth + 1))
+  );
+  return Math.max(...depths);
+};
+
+// Recompute .level for every descendant after a subtree gets moved
+const cascadeLevelUpdate = async (categoryId, newLevel) => {
+  const children = await Category.find({ parentCategory: categoryId }).select('_id');
+  await Promise.all(
+    children.map(async (c) => {
+      await Category.findByIdAndUpdate(c._id, { level: newLevel });
+      await cascadeLevelUpdate(c._id, newLevel + 1);
+    })
+  );
+};
+
 // @desc    Admin creates a category (optionally nested under a parent)
 // @route   POST /api/categories
 // @access  Private (admin)
@@ -75,6 +98,22 @@ const createCategory = asyncHandler(async (req, res) => {
     throw new Error('Category name is required');
   }
 
+  let level = 0;
+  if (parentCategory) {
+    const parent = await Category.findById(parentCategory);
+    if (!parent) {
+      res.status(400);
+      throw new Error('Parent category not found');
+    }
+    if (parent.level >= MAX_LEVEL) {
+      res.status(400);
+      throw new Error(
+        'Maximum category depth reached (Parent Category → Category → Sub Category). Products should be assigned directly to this category instead of adding another level.'
+      );
+    }
+    level = parent.level + 1;
+  }
+
   const slug = name.toLowerCase().trim().replace(/\s+/g, '-');
   const image = req.file ? req.file.path : '';
 
@@ -83,6 +122,7 @@ const createCategory = asyncHandler(async (req, res) => {
     slug,
     image,
     parentCategory: parentCategory || null,
+    level,
   });
   res.status(201).json({ success: true, category });
 });
@@ -113,18 +153,40 @@ const updateCategory = asyncHandler(async (req, res) => {
     }
 
     // prevent creating a cycle (assigning a descendant as the parent)
+    let newLevel = 0;
     if (newParentId) {
       let cursor = await Category.findById(newParentId);
-      while (cursor) {
-        if (String(cursor._id) === String(category._id)) {
+      if (!cursor) {
+        res.status(400);
+        throw new Error('Parent category not found');
+      }
+      let walker = cursor;
+      while (walker) {
+        if (String(walker._id) === String(category._id)) {
           res.status(400);
           throw new Error('Cannot move a category under one of its own descendants');
         }
-        cursor = cursor.parentCategory ? await Category.findById(cursor.parentCategory) : null;
+        walker = walker.parentCategory ? await Category.findById(walker.parentCategory) : null;
       }
+      newLevel = cursor.level + 1;
+    }
+
+    // reject the move if it would push any existing subcategory below this one past the max depth
+    const descendantDepth = await getMaxDescendantDepth(category._id);
+    if (newLevel + descendantDepth > MAX_LEVEL) {
+      res.status(400);
+      throw new Error(
+        'This move would push one of its subcategories beyond the maximum depth (Parent Category → Category → Sub Category).'
+      );
     }
 
     category.parentCategory = newParentId;
+    category.level = newLevel;
+
+    await category.save();
+    await cascadeLevelUpdate(category._id, newLevel + 1);
+    res.json({ success: true, category });
+    return;
   }
 
   await category.save();

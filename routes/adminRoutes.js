@@ -18,6 +18,13 @@ const {
 } = require('../controllers/adminController');
 const { getAllAdsAdmin } = require('../controllers/adController');
 const { getAllCategoriesAdmin } = require('../controllers/categoryController');
+const { setCategoryAttributes } = require('../controllers/categoryAttributeController');
+const {
+  getAttributes,
+  createAttribute,
+  updateAttribute,
+  deleteAttribute,
+} = require('../controllers/attributeController');
 const { getAllAgentsAdmin } = require('../controllers2/agentController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages } = require('../middleware/uploadMiddleware');
@@ -27,6 +34,15 @@ router.use(protect, authorize('admin'));
 
 // Categories (full list including inactive)
 router.get('/categories', getAllCategoriesAdmin);
+
+// Which attributes are assigned to a category (leaf categories only)
+router.put('/categories/:id/attributes', setCategoryAttributes);
+
+// Attribute definitions (Brand, Size, Color, ...)
+router.get('/attributes', getAttributes);
+router.post('/attributes', createAttribute);
+router.put('/attributes/:id', updateAttribute);
+router.delete('/attributes/:id', deleteAttribute);
 
 // Agents (full list including inactive, with commission stats)
 router.get('/agents', getAllAgentsAdmin);
