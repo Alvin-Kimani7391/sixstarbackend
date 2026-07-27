@@ -95,6 +95,143 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
   return { attributes, variants, stock, variantDefs, simpleDefs };
 }
 
+// ---------------------------------------------------------------------------
+// Wholesale-only validation: MOQ, quantity-based pricing tiers, and delivery
+// terms. Only ever runs for sellers whose role is 'wholesaler' — retailers
+// never see or send these fields, and the fields are reset to their defaults
+// for them so nothing wholesale-specific leaks onto a retail product.
+// ---------------------------------------------------------------------------
+function validateAndPrepareWholesaleFields(role, body, currentSellerPrice) {
+  if (role !== 'wholesaler') {
+    // Retailers: force these back to defaults regardless of what was sent.
+    return {
+      minOrderQuantity: 1,
+      pricingTiers: [],
+      freeDelivery: false,
+      deliveryCharge: { chargeType: 'fixed', amount: 0, perUnitAmount: 0, notes: '' },
+    };
+  }
+
+  // --- MOQ ---
+  let minOrderQuantity = 1;
+  if (body.minOrderQuantity !== undefined && body.minOrderQuantity !== '') {
+    minOrderQuantity = Number(body.minOrderQuantity);
+    if (Number.isNaN(minOrderQuantity) || minOrderQuantity < 1) {
+      const err = new Error('Minimum order quantity must be a whole number of 1 or more');
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  // --- Quantity-based pricing tiers ---
+  let pricingTiers = [];
+  if (body.pricingTiers !== undefined && body.pricingTiers !== '') {
+    let raw;
+    try {
+      raw = typeof body.pricingTiers === 'string' ? JSON.parse(body.pricingTiers) : body.pricingTiers;
+    } catch (e) {
+      const err = new Error('pricingTiers must be valid JSON');
+      err.status = 400;
+      throw err;
+    }
+
+    if (!Array.isArray(raw)) {
+      const err = new Error('pricingTiers must be an array');
+      err.status = 400;
+      throw err;
+    }
+
+    pricingTiers = raw.map((t) => {
+      const minQty = Number(t.minQty);
+      const price = Number(t.price);
+      if (Number.isNaN(minQty) || minQty < 1) {
+        const err = new Error('Each pricing tier needs a valid minimum quantity of 1 or more');
+        err.status = 400;
+        throw err;
+      }
+      if (Number.isNaN(price) || price < 0) {
+        const err = new Error('Each pricing tier needs a valid, non-negative price');
+        err.status = 400;
+        throw err;
+      }
+      return { minQty, price };
+    });
+
+    // Sort ascending by quantity, then make sure the price actually drops (or stays flat)
+    // as quantity increases — otherwise the tiers don't make sense as "bulk" pricing.
+    pricingTiers.sort((a, b) => a.minQty - b.minQty);
+
+    const seenQty = new Set();
+    for (let i = 0; i < pricingTiers.length; i++) {
+      if (seenQty.has(pricingTiers[i].minQty)) {
+        const err = new Error('Each pricing tier must have a unique minimum quantity');
+        err.status = 400;
+        throw err;
+      }
+      seenQty.add(pricingTiers[i].minQty);
+
+      if (i > 0 && pricingTiers[i].price > pricingTiers[i - 1].price) {
+        const err = new Error(
+          'Pricing tiers must not increase in price as quantity goes up — bulk pricing should stay flat or get cheaper'
+        );
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    if (pricingTiers.length > 0 && minOrderQuantity && pricingTiers[0].minQty < minOrderQuantity) {
+      const err = new Error('The first pricing tier quantity cannot be lower than the minimum order quantity');
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  // --- Delivery terms ---
+  const freeDelivery = body.freeDelivery === true || body.freeDelivery === 'true';
+  let deliveryCharge = { chargeType: 'fixed', amount: 0, perUnitAmount: 0, notes: '' };
+
+  if (!freeDelivery) {
+    let rawCharge = {};
+    if (body.deliveryCharge !== undefined && body.deliveryCharge !== '') {
+      try {
+        rawCharge = typeof body.deliveryCharge === 'string' ? JSON.parse(body.deliveryCharge) : body.deliveryCharge;
+      } catch (e) {
+        const err = new Error('deliveryCharge must be valid JSON');
+        err.status = 400;
+        throw err;
+      }
+    }
+
+    const chargeType = ['fixed', 'quantity_based', 'negotiated'].includes(rawCharge.chargeType)
+      ? rawCharge.chargeType
+      : 'fixed';
+
+    if (chargeType === 'fixed') {
+      const amount = Number(rawCharge.amount);
+      if (Number.isNaN(amount) || amount < 0) {
+        const err = new Error('Please provide a valid fixed delivery charge');
+        err.status = 400;
+        throw err;
+      }
+      deliveryCharge = { chargeType, amount, perUnitAmount: 0, notes: '' };
+    } else if (chargeType === 'quantity_based') {
+      const perUnitAmount = Number(rawCharge.perUnitAmount);
+      if (Number.isNaN(perUnitAmount) || perUnitAmount < 0) {
+        const err = new Error('Please provide a valid per-unit delivery charge');
+        err.status = 400;
+        throw err;
+      }
+      deliveryCharge = { chargeType, amount: 0, perUnitAmount, notes: '' };
+    } else {
+      // negotiated
+      const notes = (rawCharge.notes || '').toString().trim();
+      deliveryCharge = { chargeType, amount: 0, perUnitAmount: 0, notes };
+    }
+  }
+
+  return { minOrderQuantity, pricingTiers, freeDelivery, deliveryCharge };
+}
+
 // @desc    Seller creates a new product (starts as 'draft')
 // @route   POST /api/products
 // @access  Private (wholesaler, retailer)
@@ -155,6 +292,15 @@ const createProduct = asyncHandler(async (req, res) => {
     }
   }
 
+  // Wholesale-specific fields (no-op / defaults for retailers)
+  let wholesale;
+  try {
+    wholesale = validateAndPrepareWholesaleFields(req.user.role, req.body);
+  } catch (err) {
+    res.status(err.status || 400);
+    throw err;
+  }
+
   const images = req.files.map((file) => file.path);
 
   const product = await Product.create({
@@ -169,6 +315,10 @@ const createProduct = asyncHandler(async (req, res) => {
     discountPercent: discountPercent || 0,
     status: 'draft',
     attributes: prepared.attributes,
+    minOrderQuantity: wholesale.minOrderQuantity,
+    pricingTiers: wholesale.pricingTiers,
+    freeDelivery: wholesale.freeDelivery,
+    deliveryCharge: wholesale.deliveryCharge,
   });
 
   if (prepared.variants.length > 0) {
@@ -262,6 +412,26 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.stock = Number(req.body.stock);
   }
 
+  // Wholesale-specific fields — only re-validated/applied when the seller actually
+  // sent one of these keys, so a plain "just editing the description" PUT from a
+  // wholesaler doesn't wipe out previously-saved tiers/delivery terms.
+  const wholesaleKeysSent = ['minOrderQuantity', 'pricingTiers', 'freeDelivery', 'deliveryCharge'].some(
+    (k) => req.body[k] !== undefined
+  );
+  if (wholesaleKeysSent) {
+    let wholesale;
+    try {
+      wholesale = validateAndPrepareWholesaleFields(req.user.role, req.body);
+    } catch (err) {
+      res.status(err.status || 400);
+      throw err;
+    }
+    product.minOrderQuantity = wholesale.minOrderQuantity;
+    product.pricingTiers = wholesale.pricingTiers;
+    product.freeDelivery = wholesale.freeDelivery;
+    product.deliveryCharge = wholesale.deliveryCharge;
+  }
+
   if (req.files && req.files.length > 0) {
     product.images = req.files.map((file) => file.path);
   }
@@ -349,12 +519,29 @@ const deleteProduct = asyncHandler(async (req, res) => {
 // @route   GET /api/products
 // @access  Public
 const getProducts = asyncHandler(async (req, res) => {
-  const { category, search, minPrice, maxPrice, sort, page = 1, limit = 20, hotDeals, attributes } = req.query;
+  const {
+    category,
+    search,
+    minPrice,
+    maxPrice,
+    sort,
+    page = 1,
+    limit = 20,
+    hotDeals,
+    attributes,
+    sellerRole, // 'wholesaler' | 'retailer' — lets the storefront show "Wholesale" sections
+    freeDelivery, // 'true' — powers the "Free Delivery Wholesale Products" section
+  } = req.query;
 
   const filter = { status: 'active', isActive: true, finalPrice: { $ne: null } };
 
   if (category) filter.category = category;
   if (hotDeals === 'true') filter.isHotDeal = true;
+  if (sellerRole === 'wholesaler' || sellerRole === 'retailer') filter.sellerRole = sellerRole;
+  if (freeDelivery === 'true') {
+    filter.sellerRole = 'wholesaler';
+    filter.freeDelivery = true;
+  }
   if (search) filter.$text = { $search: search };
   if (minPrice || maxPrice) {
     filter.finalPrice = { ...filter.finalPrice };
