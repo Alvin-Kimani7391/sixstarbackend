@@ -5,11 +5,24 @@ const Counter = require('./Counter');
 const orderItemSchema = new Schema(
   {
     product: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
+
+    // Which specific variant (e.g. Color: Red / Size: 42) was purchased, if the
+    // product's category has variant-defining attributes. Null for products with
+    // no variant attributes at all.
+    variant: { type: Schema.Types.ObjectId, ref: 'ProductVariant', default: null },
+    variantLabel: { type: String, default: '' }, // snapshot, e.g. "Red / 42"
+
     seller: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    sellerRole: { type: String, enum: ['wholesaler', 'retailer'], required: true }, // snapshot
+
     name: String, // snapshot at time of purchase
     image: String,
     quantity: { type: Number, required: true, min: 1 },
-    priceAtPurchase: { type: Number, required: true }, // snapshot of displayPrice
+    priceAtPurchase: { type: Number, required: true }, // snapshot of tier-resolved unit price
+
+    // This line's contribution to delivery cost (wholesale only — 0 for retailer
+    // lines, which are covered by the order-level transportFee instead).
+    deliveryFee: { type: Number, default: 0 },
   },
   { _id: false }
 );
@@ -22,7 +35,15 @@ const orderSchema = new Schema(
 
     buyer: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     items: { type: [orderItemSchema], required: true },
-    totalAmount: { type: Number, required: true },
+    totalAmount: { type: Number, required: true }, // items + deliveryFee
+
+    // --- Delivery breakdown (previously nowhere to persist this) ---
+    deliveryFee: { type: Number, default: 0 }, // transportFee + wholesaleDeliveryFee
+    deliveryDetails: {
+      transportFee: { type: Number, default: 0 }, // retail region/town transport
+      wholesaleDeliveryFee: { type: Number, default: 0 }, // sum of per-product wholesale delivery
+      notes: { type: [String], default: [] }, // e.g. negotiated-delivery terms per product
+    },
 
     shippingAddress: {
       fullName: String,
@@ -50,9 +71,7 @@ const orderSchema = new Schema(
       default: 'processing',
     },
 
-    // --- Agent attribution (FIX: these fields were referenced in orderController.js's
-    // createOrder but never declared here, so Mongoose's strict mode silently dropped
-    // them on save. Every order placed with an agent code lost that link on write. ) ---
+    // --- Agent attribution ---
     agent: { type: Schema.Types.ObjectId, ref: 'Agent', default: null, index: true },
     agentCode: { type: String, default: '' },
     commissionAmount: { type: Number, default: 0 },
@@ -70,8 +89,6 @@ orderSchema.pre('validate', function (next) {
 });
 
 // Assign a sequential ORD-### number the first time this order is saved.
-// Uses a single atomic $inc on a shared counter doc, so two orders created
-// at the exact same moment can never collide on the same number.
 orderSchema.pre('save', async function (next) {
   if (this.isNew && !this.orderNumber) {
     try {
