@@ -21,25 +21,57 @@ const userSchema = new Schema(
       lowercase: true,
       trim: true,
     },
-    phone: { type: String, required: [true, 'Phone number is required'], trim: true },
-    password: { type: String, required: true, minlength: 6, select: false },
+    // Not required for Google sign-ups, who can add it later from their profile
+    phone: {
+      type: String,
+      required: function () {
+        return !this.googleId;
+      },
+      trim: true,
+    },
+    // Not required for Google-only accounts (they authenticate via Google, not a local password)
+    password: {
+      type: String,
+      required: function () {
+        return !this.googleId;
+      },
+      minlength: 6,
+      select: false,
+    },
     avatar: { type: String, default: '' },
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true }, // admin can suspend an account
+
+    // ---------- Google Sign-In ----------
+    googleId: { type: String, unique: true, sparse: true, select: false },
+
+    // ---------- Forgot / reset password ----------
+    resetPasswordToken: { type: String, select: false },
+    resetPasswordExpire: { type: Date, select: false },
+
+    // ---------- Login lockout (brute-force protection) ----------
+    failedLoginAttempts: { type: Number, default: 0, select: false },
+    lockUntil: { type: Date, select: false },
   },
   baseOptions
 );
 
-// Hash password before saving
+// Hash password before saving (skips if this save doesn't touch the password,
+// e.g. a Google-only account with no password field at all)
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+  if (!this.isModified('password') || !this.password) return next();
   const salt = await bcrypt.genSalt(10);
   this.password = await bcrypt.hash(this.password, salt);
   next();
 });
 
 userSchema.methods.matchPassword = async function (enteredPassword) {
+  if (!this.password) return false; // Google-only account has no local password to match
   return bcrypt.compare(enteredPassword, this.password);
+};
+
+userSchema.methods.isLocked = function () {
+  return !!(this.lockUntil && this.lockUntil > Date.now());
 };
 
 const User = mongoose.model('User', userSchema);
