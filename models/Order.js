@@ -18,7 +18,13 @@ const orderItemSchema = new Schema(
     name: String, // snapshot at time of purchase
     image: String,
     quantity: { type: Number, required: true, min: 1 },
-    priceAtPurchase: { type: Number, required: true }, // snapshot of tier-resolved unit price
+    priceAtPurchase: { type: Number, required: true }, // snapshot of tier-resolved BUYER-facing unit price
+
+    // Snapshot of the SELLER's own asking price (+ variant adjustment) at time of
+    // purchase, independent of whatever admin markup/discount was applied to
+    // priceAtPurchase above. This is what the seller dashboard displays — it never
+    // drifts even if the seller later edits their product's sellerPrice.
+    sellerPriceAtPurchase: { type: Number, required: true },
 
     // This line's contribution to delivery cost (wholesale only — 0 for retailer
     // lines, which are covered by the order-level transportFee instead).
@@ -37,7 +43,7 @@ const orderSchema = new Schema(
     items: { type: [orderItemSchema], required: true },
     totalAmount: { type: Number, required: true }, // items + deliveryFee
 
-    // --- Delivery breakdown (previously nowhere to persist this) ---
+    // --- Delivery breakdown ---
     deliveryFee: { type: Number, default: 0 }, // transportFee + wholesaleDeliveryFee
     deliveryDetails: {
       transportFee: { type: Number, default: 0 }, // retail region/town transport

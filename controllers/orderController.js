@@ -49,7 +49,7 @@ const createOrder = asyncHandler(async (req, res) => {
   let wholesaleDeliveryTotal = 0;
   let hasRetailItem = false;
   const deliveryNotes = [];
-  const prepared = []; // { product, variantDoc, quantity, unitPrice, deliveryFee }
+  const prepared = []; // { product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee }
 
   for (const reqItem of items) {
     const product = await Product.findOne({ _id: reqItem.productId, status: 'active', isActive: true });
@@ -104,7 +104,7 @@ const createOrder = asyncHandler(async (req, res) => {
       throw new Error(`Insufficient stock for ${product.name}`);
     }
 
-    // --- Price: server-computed and tier-aware, never trust a client-submitted price ---
+    // --- Buyer-facing price: server-computed and tier-aware, never trust a client-submitted price ---
     const basePrice = product.displayPrice;
     if (basePrice == null) {
       res.status(400);
@@ -113,16 +113,21 @@ const createOrder = asyncHandler(async (req, res) => {
     const unitPrice = resolveUnitPrice(basePrice, product.pricingTiers, quantity) + (variantDoc?.priceAdjustment || 0);
     itemsTotal += unitPrice * quantity;
 
+    // --- Seller's own price snapshot (what the seller sees in their dashboard),
+    // independent of admin markup/discount. Locked in at purchase time so it
+    // never drifts if the seller later edits the product. ---
+    const sellerUnitPrice = (product.sellerPrice || 0) + (variantDoc?.priceAdjustment || 0);
+
     // --- Wholesale delivery, computed from the seller's own terms on the product ---
     const { fee, note } = computeWholesaleDeliveryForItem(product, quantity);
     wholesaleDeliveryTotal += fee;
     if (note) deliveryNotes.push(`${product.name}: ${note}`);
 
-    prepared.push({ product, variantDoc, quantity, unitPrice, deliveryFee: fee });
+    prepared.push({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee: fee });
   }
 
   // ---------------- PASS 2: everything validated — now commit stock + build order ----------------
-  const orderItems = prepared.map(({ product, variantDoc, quantity, unitPrice, deliveryFee }) => ({
+  const orderItems = prepared.map(({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee }) => ({
     product: product._id,
     variant: variantDoc ? variantDoc._id : null,
     variantLabel: variantDoc ? variantDoc.combination.map((c) => c.value).join(' / ') : '',
@@ -132,6 +137,7 @@ const createOrder = asyncHandler(async (req, res) => {
     image: product.images[0],
     quantity,
     priceAtPurchase: unitPrice,
+    sellerPriceAtPurchase: sellerUnitPrice,
     deliveryFee,
   }));
 

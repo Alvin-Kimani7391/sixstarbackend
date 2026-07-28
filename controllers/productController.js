@@ -336,6 +336,9 @@ const createProduct = asyncHandler(async (req, res) => {
 // @desc    Seller updates their own draft/rejected product
 // @route   PUT /api/products/:id
 // @access  Private (owner only)
+// @desc    Seller updates their own draft/rejected/live product
+// @route   PUT /api/products/:id
+// @access  Private (owner only)
 const updateProduct = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
 
@@ -349,10 +352,16 @@ const updateProduct = asyncHandler(async (req, res) => {
     throw new Error('Not authorized to edit this product');
   }
 
-  if (!['draft', 'rejected'].includes(product.status)) {
+  // Sellers can edit a draft, a rejected product, or a currently-live product.
+  // Editing a live product pulls it back into review (handled below) so buyers
+  // never see unreviewed changes on the storefront. Pending/suspended products
+  // can't be touched until admin resolves them.
+  if (!['draft', 'rejected', 'active'].includes(product.status)) {
     res.status(400);
-    throw new Error('Only draft or rejected products can be edited by the seller');
+    throw new Error('This product cannot be edited while pending review or suspended.');
   }
+
+  const wasLive = product.status === 'active';
 
   const editableFields = ['name', 'description', 'sellerPrice', 'discountPercent'];
   editableFields.forEach((field) => {
@@ -436,10 +445,20 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.images = req.files.map((file) => file.path);
   }
 
-  // Editing after rejection sends it back into the review queue
+  // Editing after rejection sends it back into the review queue as a draft
+  // (seller still has to hit "Submit" — matches the normal draft flow).
   if (product.status === 'rejected') {
     product.status = 'draft';
     product.rejectionReason = '';
+  }
+
+  // Editing a LIVE product pulls it from the storefront immediately and sends it
+  // straight back to admin's pending queue — no separate "submit" step, since the
+  // seller already made an explicit decision to change something that's selling.
+  if (wasLive) {
+    product.status = 'pending_review';
+    product.reviewedBy = null;
+    product.reviewedAt = null;
   }
 
   await product.save();
