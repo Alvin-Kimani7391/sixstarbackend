@@ -16,16 +16,16 @@ const COLORS = {
   ink: '#0f172a',
   muted: '#64748b',
   border: '#e5e7eb',
-  bg: '#eef2f6',
+  bg: '#f4f4f4',
   card: '#ffffff',
-  headerFrom: '#0f172a',
-  headerTo: '#0f766e',
-  accent: '#0f766e',
-  accentDark: '#0b5b54',
+  headerFrom: '#000000',
+  headerTo: '#ff6600',
+  accent: '#ff6600',
+  accentDark: '#b34700',
   success: '#059669',
   warning: '#d97706',
   danger: '#dc2626',
-  chip: '#f1f5f9',
+  chip: '#fff4ec',
 };
 
 const money = (n) => `KES ${Number(n || 0).toLocaleString()}`;
