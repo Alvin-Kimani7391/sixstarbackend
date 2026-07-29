@@ -2,8 +2,16 @@ const asyncHandler = require('express-async-handler');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
 const { User } = require('../models/User');
+const sendEmail = require('../utils/sendEmail');
+const {
+  productApprovedTemplate,
+  productRejectedTemplate,
+  paymentDecisionTemplate,
+} = require('../utils/emailTemplates');
 
-
+function safeSendEmail(opts, label) {
+  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
+}
 
 // @desc    Get ALL products regardless of status - the main dashboard product table
 // @route   GET /api/admin/products?status=active&search=phone&page=1&limit=20
@@ -183,6 +191,18 @@ const approveProduct = asyncHandler(async (req, res) => {
 
   await product.save();
   res.json({ success: true, message: 'Product approved and now live', product });
+
+  const seller = await User.findById(product.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `Product Approved - ${product.name}`,
+        html: productApprovedTemplate({ product, sellerName: seller.name }),
+      },
+      'Product approved'
+    );
+  }
 });
 
 // @desc    Admin rejects a product back to the seller with a reason
@@ -208,6 +228,18 @@ const rejectProduct = asyncHandler(async (req, res) => {
 
   await product.save();
   res.json({ success: true, message: 'Product rejected', product });
+
+  const seller = await User.findById(product.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `Product Needs Changes - ${product.name}`,
+        html: productRejectedTemplate({ product, sellerName: seller.name, reason }),
+      },
+      'Product rejected'
+    );
+  }
 });
 
 // @desc    Admin edits an already-live product's price/discount/hot-deal flag anytime
@@ -266,7 +298,7 @@ const verifyOrderPayment = asyncHandler(async (req, res) => {
     throw new Error('Decision must be "confirmed" or "rejected"');
   }
 
-  const order = await Order.findById(req.params.id);
+  const order = await Order.findById(req.params.id).populate('buyer', 'name email');
   if (!order) {
     res.status(404);
     throw new Error('Order not found');
@@ -279,6 +311,20 @@ const verifyOrderPayment = asyncHandler(async (req, res) => {
 
   await order.save();
   res.json({ success: true, order });
+
+  if (order.buyer?.email) {
+    safeSendEmail(
+      {
+        to: order.buyer.email,
+        subject:
+          decision === 'confirmed'
+            ? `Payment Confirmed - ${order.orderNumber}`
+            : `Payment Could Not Be Verified - ${order.orderNumber}`,
+        html: paymentDecisionTemplate({ order, buyerName: order.buyer.name, decision }),
+      },
+      'Payment verification'
+    );
+  }
 });
 
 // @desc    Get all users, filterable by role - for admin user management

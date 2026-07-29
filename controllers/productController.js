@@ -3,7 +3,40 @@ const Product = require('../models/Product');
 const ProductVariant = require('../models/ProductVariant');
 const ProductView = require('../models/ProductView');
 const Category = require('../models/Category');
+const { User } = require('../models/User');
+const sendEmail = require('../utils/sendEmail');
+const { productSubmittedAdminTemplate } = require('../utils/emailTemplates');
 const { isLeafCategory, getCategoryAttributeDefs } = require('./categoryAttributeController');
+
+// Best-effort admin recipient list: explicit env override first, otherwise every
+// user with role "admin".
+async function getAdminEmails() {
+  if (process.env.ADMIN_EMAILS) {
+    return process.env.ADMIN_EMAILS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const admins = await User.find({ role: 'admin' }).select('email');
+  return admins.map((a) => a.email).filter(Boolean);
+}
+
+function safeSendEmail(opts, label) {
+  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
+}
+
+// Notifies every admin that a product needs review (used for both first-time
+// submission and re-submission after a live product is edited).
+async function notifyAdminsProductPending(product, sellerName) {
+  const adminEmails = await getAdminEmails();
+  adminEmails.forEach((to) => {
+    safeSendEmail(
+      {
+        to,
+        subject: `Product Awaiting Review - ${product.name}`,
+        html: productSubmittedAdminTemplate({ product, sellerName }),
+      },
+      'Product submitted (admin alert)'
+    );
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Shared validation: given a leaf category plus whatever attributes/variants
@@ -491,6 +524,11 @@ const updateProduct = asyncHandler(async (req, res) => {
     .populate('variants');
 
   res.json({ success: true, product: populated });
+
+  // A previously-live product just went back to pending_review — admins need to know.
+  if (wasLive) {
+    notifyAdminsProductPending(product, req.user.name);
+  }
 });
 
 // @desc    Seller submits a draft product for admin review/pricing
@@ -516,6 +554,8 @@ const submitProductForReview = asyncHandler(async (req, res) => {
   await product.save();
 
   res.json({ success: true, message: 'Product submitted for admin review', product });
+
+  notifyAdminsProductPending(product, req.user.name);
 });
 
 // @desc    Get the logged-in seller's own products (any status)

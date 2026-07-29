@@ -3,6 +3,14 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const ProductVariant = require('../models/ProductVariant');
 const Agent = require('../models/Agent');
+const { User } = require('../models/User');
+const sendEmail = require('../utils/sendEmail');
+const {
+  orderConfirmationTemplate,
+  newOrderSellerTemplate,
+  newOrderAdminTemplate,
+  orderStatusUpdateTemplate,
+} = require('../utils/emailTemplates');
 const { getCategoryAttributeDefs } = require('./categoryAttributeController');
 
 // Mirrors SS_CART.resolveUnitPrice on the frontend, but this is the copy that
@@ -26,6 +34,21 @@ function computeWholesaleDeliveryForItem(product, qty) {
   if (dc.chargeType === 'fixed') return { fee: Number(dc.amount) || 0, note: '' };
   if (dc.chargeType === 'quantity_based') return { fee: (Number(dc.perUnitAmount) || 0) * qty, note: '' };
   return { fee: 0, note: dc.notes || 'Delivery terms to be agreed directly with the seller' };
+}
+
+// Best-effort admin recipient list: explicit env override first, otherwise every
+// user with role "admin". A logging failure here should never break checkout.
+async function getAdminEmails() {
+  if (process.env.ADMIN_EMAILS) {
+    return process.env.ADMIN_EMAILS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const admins = await User.find({ role: 'admin' }).select('email');
+  return admins.map((a) => a.email).filter(Boolean);
+}
+
+// Fire-and-forget wrapper so a SendGrid hiccup never fails the HTTP response.
+function safeSendEmail(opts, label) {
+  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
 }
 
 // @desc    Buyer places an order and pastes their M-Pesa confirmation message
@@ -197,7 +220,56 @@ const createOrder = asyncHandler(async (req, res) => {
     message: 'Order placed. Your payment will be verified shortly.',
     order,
   });
+
+  // ---------------- EMAILS (fire-and-forget, never block the response) ----------------
+  sendOrderEmails(order, req.user).catch((err) =>
+    console.error('createOrder email dispatch failed:', err)
+  );
 });
+
+async function sendOrderEmails(order, buyer) {
+  // 1) Buyer confirmation
+  safeSendEmail(
+    {
+      to: buyer.email,
+      subject: `Order Confirmation - ${order.orderNumber}`,
+      html: orderConfirmationTemplate({ order, buyerName: buyer.name }),
+    },
+    'Buyer order confirmation'
+  );
+
+  // 2) One email per seller, containing only that seller's items
+  const sellerIds = [...new Set(order.items.map((i) => i.seller.toString()))];
+  const sellers = await User.find({ _id: { $in: sellerIds } }).select('name email');
+  const sellerMap = new Map(sellers.map((s) => [s._id.toString(), s]));
+
+  for (const sellerId of sellerIds) {
+    const seller = sellerMap.get(sellerId);
+    if (!seller || !seller.email) continue;
+    const items = order.items.filter((i) => i.seller.toString() === sellerId);
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `New Order - ${order.orderNumber}`,
+        html: newOrderSellerTemplate({ order, sellerName: seller.name, items }),
+      },
+      'Seller new-order notification'
+    );
+  }
+
+  // 3) Admin alert — payment needs verification
+  const adminEmails = await getAdminEmails();
+  adminEmails.forEach((to) => {
+    safeSendEmail(
+      {
+        to,
+        subject: `New Order Needs Payment Verification - ${order.orderNumber}`,
+        html: newOrderAdminTemplate({ order, buyerName: buyer.name }),
+      },
+      'Admin new-order alert'
+    );
+  });
+}
 
 // @desc    Buyer views their own order history
 // @route   GET /api/orders/my-orders
@@ -296,7 +368,7 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
     throw new Error('Invalid order status');
   }
 
-  const order = await Order.findById(req.params.id);
+  const order = await Order.findById(req.params.id).populate('buyer', 'name email');
   if (!order) {
     res.status(404);
     throw new Error('Order not found');
@@ -311,20 +383,31 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
   order.orderStatus = orderStatus;
   await order.save();
   res.json({ success: true, order });
+
+  if (order.buyer?.email) {
+    safeSendEmail(
+      {
+        to: order.buyer.email,
+        subject: `Order Update - ${order.orderNumber}`,
+        html: orderStatusUpdateTemplate({ order, buyerName: order.buyer.name, status: orderStatus }),
+      },
+      'Order status update'
+    );
+  }
 });
 
 // @desc    Buyer (or admin) cancels an order that hasn't shipped yet
 // @route   PATCH /api/orders/:id/cancel
 // @access  Private (buyer who owns the order, or admin)
 const cancelOrder = asyncHandler(async (req, res) => {
-  const order = await Order.findById(req.params.id);
+  const order = await Order.findById(req.params.id).populate('buyer', 'name email');
 
   if (!order) {
     res.status(404);
     throw new Error('Order not found');
   }
 
-  if (order.buyer.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+  if (order.buyer._id.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
     res.status(403);
     throw new Error('Not authorized to cancel this order');
   }
@@ -356,6 +439,17 @@ const cancelOrder = asyncHandler(async (req, res) => {
     message: 'Order cancelled successfully',
     order,
   });
+
+  if (order.buyer?.email) {
+    safeSendEmail(
+      {
+        to: order.buyer.email,
+        subject: `Order Cancelled - ${order.orderNumber}`,
+        html: orderStatusUpdateTemplate({ order, buyerName: order.buyer.name, status: 'cancelled' }),
+      },
+      'Order cancellation'
+    );
+  }
 });
 
 module.exports = {
@@ -366,4 +460,5 @@ module.exports = {
   getSellerOrders,
   updateOrderStatus,
   cancelOrder,
+  getAdminEmails,
 };

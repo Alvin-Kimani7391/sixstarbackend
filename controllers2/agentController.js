@@ -1,6 +1,12 @@
 const asyncHandler = require('express-async-handler');
 const Agent = require('../models/Agent');
 const Order = require('../models/Order'); // NEW - needed for getAgentOrders below
+const sendEmail = require('../utils/sendEmail');
+const { agentWelcomeTemplate } = require('../utils/emailTemplates');
+
+function safeSendEmail(opts, label) {
+  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
+}
 
 // @desc    Get all ACTIVE agents - for the checkout page's agent picker
 // @route   GET /api/agents
@@ -31,6 +37,18 @@ const createAgent = asyncHandler(async (req, res) => {
 
   const agent = await Agent.create({ name, phone, email, commissionRate });
   res.status(201).json({ success: true, agent });
+
+  // Agents without an email on file simply don't get a welcome email — nothing to send to.
+  if (agent.email) {
+    safeSendEmail(
+      {
+        to: agent.email,
+        subject: `Your Agent Code - ${agent.code}`,
+        html: agentWelcomeTemplate({ name: agent.name, code: agent.code }),
+      },
+      'Agent welcome'
+    );
+  }
 });
 
 // @desc    Admin updates an agent's details (code itself cannot be changed)

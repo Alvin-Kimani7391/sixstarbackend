@@ -4,7 +4,10 @@ const { OAuth2Client } = require('google-auth-library');
 const { User, Wholesaler, Retailer, Buyer, Admin } = require('../models/User');
 const generateToken = require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
-const { passwordResetEmailTemplate } = require('../utils/emailTemplates');
+const {
+  passwordResetEmailTemplate,
+  welcomeEmailTemplate,
+} = require('../utils/emailTemplates');
 
 const roleModelMap = { wholesaler: Wholesaler, retailer: Retailer, buyer: Buyer, admin: Admin };
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -12,6 +15,15 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCK_TIME_MS = 15 * 60 * 1000; // 15 minutes
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// Fire-and-forget helper — a failed welcome email should never break signup.
+function sendWelcomeEmail(user) {
+  sendEmail({
+    to: user.email,
+    subject: `Welcome to Six Star Suppliers, ${user.name?.split(' ')[0] || ''}!`,
+    html: welcomeEmailTemplate({ name: user.name, role: user.role }),
+  }).catch((err) => console.error('Welcome email failed:', err.response?.body || err.message));
+}
 
 // @desc    Register a new user (wholesaler, retailer, or buyer)
 // @route   POST /api/auth/register
@@ -59,6 +71,8 @@ const registerUser = asyncHandler(async (req, res) => {
     success: true,
     user: sanitizeUser(user),
   });
+
+  sendWelcomeEmail(user);
 });
 
 // @desc    Login any user type
@@ -154,6 +168,7 @@ const googleAuth = asyncHandler(async (req, res) => {
   }
 
   let user = await User.findOne({ $or: [{ googleId }, { email }] }).select('+googleId');
+  let isNewSignup = false;
 
   if (user) {
     // Existing account (registered with email/password) signing in with Google for the first time
@@ -177,11 +192,14 @@ const googleAuth = asyncHandler(async (req, res) => {
       avatar: picture,
       isVerified: true,
     });
+    isNewSignup = true;
   }
 
   generateToken(res, user._id);
 
   res.json({ success: true, user: sanitizeUser(user) });
+
+  if (isNewSignup) sendWelcomeEmail(user);
 });
 
 // @desc    Request a password reset email
