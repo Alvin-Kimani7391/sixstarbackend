@@ -22,7 +22,8 @@ const pricingTierSchema = new Schema(
   { _id: false }
 );
 
-// Wholesale delivery terms. Only meaningful when sellerRole === 'wholesaler'.
+// Wholesale delivery terms. Only meaningful when sellerRole === 'wholesaler'
+// AND deliveryType === 'heavy' (see below).
 //  - freeDelivery = true  -> the rest of this object is ignored, product gets the
 //    "Free Delivery" tag on the frontend.
 //  - freeDelivery = false -> chargeType decides which of the amount fields applies:
@@ -84,6 +85,17 @@ const productSchema = new Schema(
     discountPercent: { type: Number, default: 0, min: 0, max: 90 },
 
     // --- Wholesaler-only fields (ignored/validated-away for retailers) ---
+
+    // Whether this wholesale product needs its own negotiated/bulky transport terms
+    // ('heavy' — the classic wholesale delivery panel below applies), or is light
+    // enough to just ship like a normal retail item at checkout ('simple' — buyer
+    // pays the regular regional transport fee, no MOQ-style delivery math at all).
+    // Always 'simple' for retailers (irrelevant to them).
+    deliveryType: {
+      type: String,
+      enum: ['simple', 'heavy'],
+      default: 'heavy',
+    },
     minOrderQuantity: {
       type: Number,
       default: 1,
@@ -93,11 +105,11 @@ const productSchema = new Schema(
       type: [pricingTierSchema],
       default: [],
     }, // quantity-based bulk pricing, e.g. 50 units @ X, 100 units @ Y, 500 units @ Z
-    freeDelivery: { type: Boolean, default: false },
+    freeDelivery: { type: Boolean, default: false }, // only meaningful when deliveryType === 'heavy'
     deliveryCharge: {
       type: deliveryChargeSchema,
       default: () => ({}),
-    },
+    }, // only meaningful when deliveryType === 'heavy'
 
     // --- Approval workflow ---
     status: {
@@ -116,6 +128,12 @@ const productSchema = new Schema(
     ratingsAverage: { type: Number, default: 0, min: 0, max: 5 },
     ratingsCount: { type: Number, default: 0 },
 
+    // --- Analytics ---
+    // Lifetime total of product-detail-page views. Incremented via $inc on every
+    // public view (see trackProductViewCount) — cheap to read for dashboard cards.
+    // Day-by-day trend data lives in the separate ProductView collection.
+    viewCount: { type: Number, default: 0, index: true },
+
     isActive: { type: Boolean, default: true }, // seller/admin can soft-delete
   },
   { timestamps: true }
@@ -129,9 +147,10 @@ productSchema.virtual('displayPrice').get(function () {
 });
 
 // Virtual: the free-delivery tag used to group/filter on the frontend
-// (e.g. "Free Delivery Wholesale Products" section). Always false for retailers.
+// (e.g. "Free Delivery Wholesale Products" section). Always false for retailers
+// and for 'simple' wholesale products (those ship like retail, no tag).
 productSchema.virtual('hasFreeDeliveryTag').get(function () {
-  return this.sellerRole === 'wholesaler' && this.freeDelivery === true;
+  return this.sellerRole === 'wholesaler' && this.deliveryType === 'heavy' && this.freeDelivery === true;
 });
 
 // Virtual populate: lets us do Product.find().populate('variants') without embedding them

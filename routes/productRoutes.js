@@ -8,6 +8,8 @@ const {
   deleteProduct,
   getProducts,
   getProductById,
+  trackProductViewCount,
+  getMyProductAnalytics,
 } = require('../controllers/productController');
 const { createReview, getProductReviews } = require('../controllers/reviewController');
 const { protect, authorize } = require('../middleware/authMiddleware');
@@ -17,12 +19,18 @@ const { uploadProductImages } = require('../middleware/uploadMiddleware');
 router.get('/', getProducts);
 
 // Seller-only (wholesaler/retailer) - MUST be declared before '/:id' or Express will
-// treat "my-products" as an :id value and route it to getProductById instead
+// treat "my-products" / "analytics" as an :id value and route it to getProductById instead
 router.get('/my-products', protect, authorize('wholesaler', 'retailer'), getMyProducts);
+router.get('/analytics', protect, authorize('wholesaler', 'retailer'), getMyProductAnalytics);
 router.post('/', protect, authorize('wholesaler', 'retailer'), uploadProductImages, createProduct);
 
 router.get('/:id', getProductById);
 router.get('/:productId/reviews', getProductReviews);
+
+// Public view-tracking ping fired once per product-detail-page load (guests included —
+// no `protect` here, req.user is simply undefined for them and the view still counts).
+router.patch('/:id/view', trackProductViewCount);
+
 router.put('/:id', protect, authorize('wholesaler', 'retailer'), uploadProductImages, updateProduct);
 router.patch('/:id/submit', protect, authorize('wholesaler', 'retailer'), submitProductForReview);
 router.delete('/:id', protect, authorize('wholesaler', 'retailer'), deleteProduct);

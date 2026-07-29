@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const Product = require('../models/Product');
 const ProductVariant = require('../models/ProductVariant');
+const ProductView = require('../models/ProductView');
 const Category = require('../models/Category');
 const { isLeafCategory, getCategoryAttributeDefs } = require('./categoryAttributeController');
 
@@ -96,15 +97,23 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
 }
 
 // ---------------------------------------------------------------------------
-// Wholesale-only validation: MOQ, quantity-based pricing tiers, and delivery
-// terms. Only ever runs for sellers whose role is 'wholesaler' — retailers
-// never see or send these fields, and the fields are reset to their defaults
-// for them so nothing wholesale-specific leaks onto a retail product.
+// Wholesale-only validation: delivery type (simple/heavy), MOQ, quantity-based
+// pricing tiers, and delivery terms.
+//
+//  - Retailers never see any of this — everything is forced back to the
+//    'simple'-equivalent defaults regardless of what was sent.
+//  - Wholesalers always get MOQ + pricing tiers (bulk buying still applies
+//    either way).
+//  - Only when deliveryType === 'heavy' do freeDelivery/deliveryCharge get
+//    validated and saved. deliveryType === 'simple' means "this ships like a
+//    normal retail product" — no special transport terms, the buyer just pays
+//    the regular regional delivery fee at checkout like anyone else.
 // ---------------------------------------------------------------------------
-function validateAndPrepareWholesaleFields(role, body, currentSellerPrice) {
+function validateAndPrepareWholesaleFields(role, body) {
   if (role !== 'wholesaler') {
     // Retailers: force these back to defaults regardless of what was sent.
     return {
+      deliveryType: 'simple',
       minOrderQuantity: 1,
       pricingTiers: [],
       freeDelivery: false,
@@ -112,7 +121,9 @@ function validateAndPrepareWholesaleFields(role, body, currentSellerPrice) {
     };
   }
 
-  // --- MOQ ---
+  const deliveryType = body.deliveryType === 'simple' ? 'simple' : 'heavy';
+
+  // --- MOQ (applies to every wholesale product, simple or heavy) ---
   let minOrderQuantity = 1;
   if (body.minOrderQuantity !== undefined && body.minOrderQuantity !== '') {
     minOrderQuantity = Number(body.minOrderQuantity);
@@ -123,7 +134,7 @@ function validateAndPrepareWholesaleFields(role, body, currentSellerPrice) {
     }
   }
 
-  // --- Quantity-based pricing tiers ---
+  // --- Quantity-based pricing tiers (also applies either way) ---
   let pricingTiers = [];
   if (body.pricingTiers !== undefined && body.pricingTiers !== '') {
     let raw;
@@ -186,50 +197,56 @@ function validateAndPrepareWholesaleFields(role, body, currentSellerPrice) {
     }
   }
 
-  // --- Delivery terms ---
-  const freeDelivery = body.freeDelivery === true || body.freeDelivery === 'true';
+  // --- Delivery terms: only meaningful for 'heavy' products ---
+  let freeDelivery = false;
   let deliveryCharge = { chargeType: 'fixed', amount: 0, perUnitAmount: 0, notes: '' };
 
-  if (!freeDelivery) {
-    let rawCharge = {};
-    if (body.deliveryCharge !== undefined && body.deliveryCharge !== '') {
-      try {
-        rawCharge = typeof body.deliveryCharge === 'string' ? JSON.parse(body.deliveryCharge) : body.deliveryCharge;
-      } catch (e) {
-        const err = new Error('deliveryCharge must be valid JSON');
-        err.status = 400;
-        throw err;
-      }
-    }
+  if (deliveryType === 'heavy') {
+    freeDelivery = body.freeDelivery === true || body.freeDelivery === 'true';
 
-    const chargeType = ['fixed', 'quantity_based', 'negotiated'].includes(rawCharge.chargeType)
-      ? rawCharge.chargeType
-      : 'fixed';
+    if (!freeDelivery) {
+      let rawCharge = {};
+      if (body.deliveryCharge !== undefined && body.deliveryCharge !== '') {
+        try {
+          rawCharge = typeof body.deliveryCharge === 'string' ? JSON.parse(body.deliveryCharge) : body.deliveryCharge;
+        } catch (e) {
+          const err = new Error('deliveryCharge must be valid JSON');
+          err.status = 400;
+          throw err;
+        }
+      }
 
-    if (chargeType === 'fixed') {
-      const amount = Number(rawCharge.amount);
-      if (Number.isNaN(amount) || amount < 0) {
-        const err = new Error('Please provide a valid fixed delivery charge');
-        err.status = 400;
-        throw err;
+      const chargeType = ['fixed', 'quantity_based', 'negotiated'].includes(rawCharge.chargeType)
+        ? rawCharge.chargeType
+        : 'fixed';
+
+      if (chargeType === 'fixed') {
+        const amount = Number(rawCharge.amount);
+        if (Number.isNaN(amount) || amount < 0) {
+          const err = new Error('Please provide a valid fixed delivery charge');
+          err.status = 400;
+          throw err;
+        }
+        deliveryCharge = { chargeType, amount, perUnitAmount: 0, notes: '' };
+      } else if (chargeType === 'quantity_based') {
+        const perUnitAmount = Number(rawCharge.perUnitAmount);
+        if (Number.isNaN(perUnitAmount) || perUnitAmount < 0) {
+          const err = new Error('Please provide a valid per-unit delivery charge');
+          err.status = 400;
+          throw err;
+        }
+        deliveryCharge = { chargeType, amount: 0, perUnitAmount, notes: '' };
+      } else {
+        // negotiated
+        const notes = (rawCharge.notes || '').toString().trim();
+        deliveryCharge = { chargeType, amount: 0, perUnitAmount: 0, notes };
       }
-      deliveryCharge = { chargeType, amount, perUnitAmount: 0, notes: '' };
-    } else if (chargeType === 'quantity_based') {
-      const perUnitAmount = Number(rawCharge.perUnitAmount);
-      if (Number.isNaN(perUnitAmount) || perUnitAmount < 0) {
-        const err = new Error('Please provide a valid per-unit delivery charge');
-        err.status = 400;
-        throw err;
-      }
-      deliveryCharge = { chargeType, amount: 0, perUnitAmount, notes: '' };
-    } else {
-      // negotiated
-      const notes = (rawCharge.notes || '').toString().trim();
-      deliveryCharge = { chargeType, amount: 0, perUnitAmount: 0, notes };
     }
   }
+  // deliveryType === 'simple' -> freeDelivery/deliveryCharge stay at their defaults above;
+  // the product ships like a normal retail item and standard checkout transport fees apply.
 
-  return { minOrderQuantity, pricingTiers, freeDelivery, deliveryCharge };
+  return { deliveryType, minOrderQuantity, pricingTiers, freeDelivery, deliveryCharge };
 }
 
 // @desc    Seller creates a new product (starts as 'draft')
@@ -315,6 +332,7 @@ const createProduct = asyncHandler(async (req, res) => {
     discountPercent: discountPercent || 0,
     status: 'draft',
     attributes: prepared.attributes,
+    deliveryType: wholesale.deliveryType,
     minOrderQuantity: wholesale.minOrderQuantity,
     pricingTiers: wholesale.pricingTiers,
     freeDelivery: wholesale.freeDelivery,
@@ -333,9 +351,6 @@ const createProduct = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, product: populated });
 });
 
-// @desc    Seller updates their own draft/rejected product
-// @route   PUT /api/products/:id
-// @access  Private (owner only)
 // @desc    Seller updates their own draft/rejected/live product
 // @route   PUT /api/products/:id
 // @access  Private (owner only)
@@ -423,10 +438,16 @@ const updateProduct = asyncHandler(async (req, res) => {
 
   // Wholesale-specific fields — only re-validated/applied when the seller actually
   // sent one of these keys, so a plain "just editing the description" PUT from a
-  // wholesaler doesn't wipe out previously-saved tiers/delivery terms.
-  const wholesaleKeysSent = ['minOrderQuantity', 'pricingTiers', 'freeDelivery', 'deliveryCharge'].some(
-    (k) => req.body[k] !== undefined
-  );
+  // wholesaler doesn't wipe out previously-saved tiers/delivery terms. Changing
+  // deliveryType counts as a wholesale-key change too, since it flips which of
+  // freeDelivery/deliveryCharge are even meaningful.
+  const wholesaleKeysSent = [
+    'deliveryType',
+    'minOrderQuantity',
+    'pricingTiers',
+    'freeDelivery',
+    'deliveryCharge',
+  ].some((k) => req.body[k] !== undefined);
   if (wholesaleKeysSent) {
     let wholesale;
     try {
@@ -435,6 +456,7 @@ const updateProduct = asyncHandler(async (req, res) => {
       res.status(err.status || 400);
       throw err;
     }
+    product.deliveryType = wholesale.deliveryType;
     product.minOrderQuantity = wholesale.minOrderQuantity;
     product.pricingTiers = wholesale.pricingTiers;
     product.freeDelivery = wholesale.freeDelivery;
@@ -558,7 +580,10 @@ const getProducts = asyncHandler(async (req, res) => {
   if (hotDeals === 'true') filter.isHotDeal = true;
   if (sellerRole === 'wholesaler' || sellerRole === 'retailer') filter.sellerRole = sellerRole;
   if (freeDelivery === 'true') {
+    // free delivery only ever applies to 'heavy' wholesale products — 'simple' ones
+    // ship like retail and never carry the free-delivery tag.
     filter.sellerRole = 'wholesaler';
+    filter.deliveryType = 'heavy';
     filter.freeDelivery = true;
   }
   if (search) filter.$text = { $search: search };
@@ -636,6 +661,83 @@ const getProductById = asyncHandler(async (req, res) => {
   res.json({ success: true, product });
 });
 
+// ---------------- ANALYTICS ----------------
+
+// @desc    Fire-and-forget: increments a product's lifetime view counter and logs
+//          a timestamped row for the seller's trend chart. Called once per
+//          product-detail-page load, for logged-in buyers and guests alike.
+// @route   PATCH /api/products/:id/view
+// @access  Public
+const trackProductViewCount = asyncHandler(async (req, res) => {
+  const product = await Product.findOneAndUpdate(
+    { _id: req.params.id, status: 'active', isActive: true },
+    { $inc: { viewCount: 1 } },
+    { new: false }
+  ).select('_id seller');
+
+  if (product) {
+    // Best-effort log — never let a logging failure affect the response.
+    ProductView.create({
+      product: product._id,
+      seller: product.seller,
+      viewer: req.user?._id || null,
+    }).catch(() => {});
+  }
+
+  res.status(204).end();
+});
+
+// @desc    Seller's product-view analytics: lifetime + 14-day totals, a daily
+//          trend (zero-filled so the frontend can draw a continuous chart),
+//          and a per-product breakdown sorted by most-viewed first.
+// @route   GET /api/products/analytics
+// @access  Private (wholesaler, retailer)
+const getMyProductAnalytics = asyncHandler(async (req, res) => {
+  const products = await Product.find({ seller: req.user._id, isActive: true })
+    .select('name images status viewCount createdAt')
+    .sort('-viewCount');
+
+  const since = new Date();
+  since.setHours(0, 0, 0, 0);
+  since.setDate(since.getDate() - 13); // last 14 days including today
+
+  const trend = await ProductView.aggregate([
+    { $match: { seller: req.user._id, viewedAt: { $gte: since } } },
+    {
+      $group: {
+        _id: { $dateToString: { format: '%Y-%m-%d', date: '$viewedAt' } },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const trendMap = new Map(trend.map((t) => [t._id, t.count]));
+  const dailyTrend = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    dailyTrend.push({ date: key, count: trendMap.get(key) || 0 });
+  }
+
+  const totalViews = products.reduce((sum, p) => sum + (p.viewCount || 0), 0);
+  const viewsLast14Days = dailyTrend.reduce((sum, d) => sum + d.count, 0);
+
+  res.json({
+    success: true,
+    totalViews,
+    viewsLast14Days,
+    dailyTrend,
+    products: products.map((p) => ({
+      id: p._id,
+      name: p.name,
+      image: (p.images && p.images[0]) || null,
+      status: p.status,
+      viewCount: p.viewCount || 0,
+    })),
+  });
+});
+
 module.exports = {
   createProduct,
   updateProduct,
@@ -644,4 +746,6 @@ module.exports = {
   deleteProduct,
   getProducts,
   getProductById,
+  trackProductViewCount,
+  getMyProductAnalytics,
 };
