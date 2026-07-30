@@ -7,6 +7,7 @@ const { User } = require('../models/User');
 const sendEmail = require('../utils/sendEmail');
 const { productSubmittedAdminTemplate } = require('../utils/emailTemplates');
 const { isLeafCategory, getCategoryAttributeDefs } = require('./categoryAttributeController');
+const { getApprovedShopForSeller } = require('./shopController');
 
 // Best-effort admin recipient list: explicit env override first, otherwise every
 // user with role "admin".
@@ -351,11 +352,19 @@ const createProduct = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  // --- Shop auto-attach (silent) ---
+  // If this seller has an APPROVED shop, the new product is automatically tied
+  // to it. No client input is trusted for this — it's derived purely from the
+  // seller's own shop status server-side. Sellers with no shop, or a shop
+  // that's pending/rejected/suspended, simply get shop: null (today's behavior).
+  const approvedShop = await getApprovedShopForSeller(req.user._id);
+
   const images = req.files.map((file) => file.path);
 
   const product = await Product.create({
     seller: req.user._id,
     sellerRole: req.user.role,
+    shop: approvedShop ? approvedShop._id : null,
     name,
     description,
     images,
@@ -379,6 +388,7 @@ const createProduct = asyncHandler(async (req, res) => {
   const populated = await Product.findById(product._id)
     .populate('category', 'name slug')
     .populate('attributes.attribute', 'name slug type unit')
+    .populate('shop', 'shopName slug status')
     .populate('variants');
 
   res.status(201).json({ success: true, product: populated });
@@ -496,6 +506,13 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.deliveryCharge = wholesale.deliveryCharge;
   }
 
+  // Keep the shop link in sync with the seller's CURRENT shop status on every
+  // save — same "derive it silently, never trust the client" rule as creation.
+  // Covers cases like: product was created before the shop got approved, or
+  // the shop was later suspended.
+  const approvedShop = await getApprovedShopForSeller(req.user._id);
+  product.shop = approvedShop ? approvedShop._id : null;
+
   if (req.files && req.files.length > 0) {
     product.images = req.files.map((file) => file.path);
   }
@@ -521,6 +538,7 @@ const updateProduct = asyncHandler(async (req, res) => {
   const populated = await Product.findById(product._id)
     .populate('category', 'name slug')
     .populate('attributes.attribute', 'name slug type unit')
+    .populate('shop', 'shopName slug status')
     .populate('variants');
 
   res.json({ success: true, product: populated });
@@ -569,6 +587,7 @@ const getMyProducts = asyncHandler(async (req, res) => {
   const products = await Product.find(filter)
     .populate('category', 'name slug')
     .populate('attributes.attribute', 'name slug type unit')
+    .populate('shop', 'shopName slug status')
     .populate({ path: 'variants', match: { isActive: true } })
     .sort('-createdAt');
 
@@ -612,6 +631,7 @@ const getProducts = asyncHandler(async (req, res) => {
     attributes,
     sellerRole, // 'wholesaler' | 'retailer' — lets the storefront show "Wholesale" sections
     freeDelivery, // 'true' — powers the "Free Delivery Wholesale Products" section
+    shop, // shop id — lets a shop's own storefront page filter to just its products
   } = req.query;
 
   const filter = { status: 'active', isActive: true, finalPrice: { $ne: null } };
@@ -619,6 +639,7 @@ const getProducts = asyncHandler(async (req, res) => {
   if (category) filter.category = category;
   if (hotDeals === 'true') filter.isHotDeal = true;
   if (sellerRole === 'wholesaler' || sellerRole === 'retailer') filter.sellerRole = sellerRole;
+  if (shop) filter.shop = shop;
   if (freeDelivery === 'true') {
     // free delivery only ever applies to 'heavy' wholesale products — 'simple' ones
     // ship like retail and never carry the free-delivery tag.
@@ -661,6 +682,7 @@ const getProducts = asyncHandler(async (req, res) => {
     Product.find(filter)
       .populate('category', 'name slug')
       .populate('seller', 'name businessName shopName role')
+      .populate('shop', 'shopName slug logo')
       .populate('attributes.attribute', 'name slug type unit')
       .populate({ path: 'variants', match: { isActive: true } })
       .sort(sortMap[sort] || '-createdAt')
@@ -690,6 +712,7 @@ const getProductById = asyncHandler(async (req, res) => {
   })
     .populate('category', 'name slug')
     .populate('seller', 'name businessName shopName role location')
+    .populate('shop', 'shopName slug logo description')
     .populate('attributes.attribute', 'name slug type unit')
     .populate({ path: 'variants', match: { isActive: true } });
 

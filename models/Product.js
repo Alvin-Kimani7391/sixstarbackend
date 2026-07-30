@@ -54,6 +54,12 @@ const productSchema = new Schema(
       required: true,
     },
 
+    // Nullable — only set automatically when the seller has an APPROVED shop at
+    // the time the product is created. Sellers with no shop (or a shop still
+    // pending/rejected/suspended) simply get null here, exactly like today.
+    // Not seller-editable directly; the backend decides this, never the client.
+    shop: { type: Schema.Types.ObjectId, ref: 'Shop', default: null, index: true },
+
     name: { type: String, required: true, trim: true },
     description: { type: String, required: true },
     images: {
