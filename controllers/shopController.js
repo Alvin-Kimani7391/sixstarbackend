@@ -1,5 +1,6 @@
 const asyncHandler = require('express-async-handler');
 const Shop = require('../models/Shop');
+const Product = require('../models/Product');
 
 // ---------------------------------------------------------------------------
 // Shared helper — used by productController to silently attach a product to
@@ -23,7 +24,8 @@ const createShop = asyncHandler(async (req, res) => {
     throw new Error('You already have a shop. Only one shop is allowed per seller right now.');
   }
 
-  const { shopName, description, businessCategory, businessHours, logo, banner } = req.body;
+  const { shopName, description, businessCategory, businessHours, logo, banner, themeConfiguration, homepageLayout } = req.body;
+
 
   if (!shopName || !shopName.trim()) {
     res.status(400);
@@ -31,6 +33,10 @@ const createShop = asyncHandler(async (req, res) => {
   }
 
   const slug = await Shop.buildUniqueSlug(shopName);
+
+const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
+const safeLayout = ALLOWED_LAYOUTS.includes(homepageLayout) ? homepageLayout : 'default';
+const safeTheme = (themeConfiguration && typeof themeConfiguration === 'object') ? themeConfiguration : {};
 
   const shop = await Shop.create({
     seller: req.user._id,
@@ -41,10 +47,28 @@ const createShop = asyncHandler(async (req, res) => {
     businessHours: businessHours || '',
     logo: logo || '',
     banner: banner || '',
+    themeConfiguration: safeTheme,
+    homepageLayout: safeLayout,
     status: 'pending_approval',
   });
 
   res.status(201).json({ success: true, message: 'Shop submitted for admin approval', shop });
+});
+
+
+const toggleMyShopActive = asyncHandler(async (req, res) => {
+  const shop = await Shop.findOne({ seller: req.user._id });
+  if (!shop) {
+    res.status(404);
+    throw new Error('You do not have a shop yet');
+  }
+  if (shop.status !== 'approved') {
+    res.status(400);
+    throw new Error('Only an approved shop can be paused or resumed');
+  }
+  shop.isActive = !shop.isActive;
+  await shop.save();
+  res.json({ success: true, shop });
 });
 
 // @desc    Seller views their own shop (or null if they haven't created one)
@@ -67,10 +91,18 @@ const updateMyShop = asyncHandler(async (req, res) => {
     throw new Error('You do not have a shop yet');
   }
 
-  const editableFields = ['description', 'businessCategory', 'businessHours', 'logo', 'banner'];
+  const editableFields = ['description', 'businessCategory', 'businessHours', 'logo', 'banner', 'themeConfiguration', 'homepageLayout'];
   editableFields.forEach((field) => {
     if (req.body[field] !== undefined) shop[field] = req.body[field];
   });
+
+  if (req.body.themeConfiguration !== undefined && typeof req.body.themeConfiguration === 'object') {
+  shop.themeConfiguration = req.body.themeConfiguration;
+}
+if (req.body.homepageLayout !== undefined) {
+  const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
+  shop.homepageLayout = ALLOWED_LAYOUTS.includes(req.body.homepageLayout) ? req.body.homepageLayout : shop.homepageLayout;
+}
 
   if (req.body.shopName !== undefined && req.body.shopName.trim() && req.body.shopName.trim() !== shop.shopName) {
     shop.shopName = req.body.shopName.trim();
@@ -292,6 +324,69 @@ const adminDeleteShop = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Shop removed' });
 });
 
+
+const getPublicShops = asyncHandler(async (req, res) => {
+  const { search, category, verified, featured, sort, page = 1, limit = 12 } = req.query;
+ 
+  const filter = { status: 'approved', isActive: true };
+  if (category) filter.businessCategory = category;
+  if (verified === 'true') filter.verificationStatus = 'verified';
+  if (featured === 'true') filter.isFeatured = true;
+  if (search) filter.$text = { $search: search };
+ 
+  const sortMap = {
+    newest: '-createdAt',
+    name: 'shopName',
+    featured: '-isFeatured -createdAt',
+  };
+ 
+  const skip = (Number(page) - 1) * Number(limit);
+ 
+  const [shops, total] = await Promise.all([
+    Shop.find(filter)
+      .select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt')
+      .sort(sortMap[sort] || sortMap.featured)
+      .skip(skip)
+      .limit(Number(limit)),
+    Shop.countDocuments(filter),
+  ]);
+ 
+  // Live "X products" count per shop, cheap at directory scale. If the shop
+  // count grows large, swap this for a $lookup in an aggregation pipeline.
+  const counts = await Product.aggregate([
+    { $match: { shop: { $in: shops.map((s) => s._id) }, status: 'active', isActive: true } },
+    { $group: { _id: '$shop', count: { $sum: 1 } } },
+  ]);
+  const countMap = new Map(counts.map((c) => [String(c._id), c.count]));
+ 
+  res.json({
+    success: true,
+    count: shops.length,
+    total,
+    page: Number(page),
+    pages: Math.ceil(total / Number(limit)),
+    shops: shops.map((s) => ({ ...s.toObject(), productCount: countMap.get(String(s._id)) || 0 })),
+  });
+});
+ 
+// @desc    Public: single approved shop by slug, for the shop storefront page
+// @route   GET /api/shops/:slug
+// @access  Public
+const getShopBySlug = asyncHandler(async (req, res) => {
+  const shop = await Shop.findOne({
+    slug: req.params.slug,
+    status: 'approved',
+    isActive: true,
+  }).select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt');
+ 
+  if (!shop) {
+    res.status(404);
+    throw new Error('Shop not found');
+  }
+ 
+  res.json({ success: true, shop });
+});
+
 module.exports = {
   getApprovedShopForSeller,
   createShop,
@@ -307,4 +402,7 @@ module.exports = {
   setShopFeatured,
   adminUpdateShop,
   adminDeleteShop,
+  toggleMyShopActive,
+  getPublicShops,
+     getShopBySlug,
 };
