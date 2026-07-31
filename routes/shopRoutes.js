@@ -22,23 +22,19 @@ const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadShopImages } = require('../middleware/uploadMiddleware');
 
 // ---------------- Seller ----------------
-router.post('/', protect, authorize('wholesaler', 'retailer'), createShop);
+// uploadShopImages parses multipart/form-data (logo + banner files, up to one
+// each) and streams them straight to Cloudinary via the shop storage config.
+// If the request isn't multipart (e.g. the Settings tab's plain JSON PUT),
+// multer just passes through without touching req.body/req.files.
+router.post('/', protect, authorize('wholesaler', 'retailer'), uploadShopImages, createShop);
 router.get('/my-shop', protect, authorize('wholesaler', 'retailer'), getMyShop);
-router.put('/my-shop', protect, authorize('wholesaler', 'retailer'), updateMyShop);
+router.put('/my-shop', protect, authorize('wholesaler', 'retailer'), uploadShopImages, updateMyShop);
 
 // ---------------- Admin ----------------
 // Namespaced under /admin here (rather than living in adminRoutes.js) so the
 // whole Shop feature stays self-contained in one route file.
 router.get('/admin', protect, authorize('admin'), getAllShopsAdmin); // full table, any status/search
 router.get('/admin/pending', protect, authorize('admin'), getPendingShops);
-
-/* ============================================================
-   ADD to routes/shopRoutes.js
-   ============================================================
-   1. Import toggleMyShopActive alongside your other controller imports.
-   2. Add this line in the "---------------- Seller ----------------"
-      section, right after the existing PUT '/my-shop' route:
-*/
 
 router.patch('/my-shop/toggle-active', protect, authorize('wholesaler', 'retailer'), toggleMyShopActive);
 
