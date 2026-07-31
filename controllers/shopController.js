@@ -10,11 +10,29 @@ async function getApprovedShopForSeller(sellerId) {
   return Shop.findOne({ seller: sellerId, status: 'approved', isActive: true }).select('_id shopName status');
 }
 
+// Safely parses themeConfiguration whether it arrived as a JSON string
+// (multipart/form-data always sends strings) or as a real object (plain
+// JSON requests, e.g. the Settings tab).
+function parseThemeConfiguration(raw, fallback = {}) {
+  if (raw === undefined || raw === null) return fallback;
+  if (typeof raw === 'object') return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Seller
 // ---------------------------------------------------------------------------
 
 // @desc    Seller creates their (single, optional) shop. Starts pending_approval.
+//          Logo/banner are optional file uploads (multipart/form-data, field
+//          names "logo" and "banner") handled by uploadShopImages and streamed
+//          to Cloudinary — req.files.logo[0].path / req.files.banner[0].path
+//          are already the final Cloudinary URLs by the time this runs.
 // @route   POST /api/shops
 // @access  Private (wholesaler, retailer)
 const createShop = asyncHandler(async (req, res) => {
@@ -24,8 +42,7 @@ const createShop = asyncHandler(async (req, res) => {
     throw new Error('You already have a shop. Only one shop is allowed per seller right now.');
   }
 
-  const { shopName, description, businessCategory, businessHours, logo, banner, themeConfiguration, homepageLayout } = req.body;
-
+  const { shopName, description, businessCategory, businessHours, homepageLayout } = req.body;
 
   if (!shopName || !shopName.trim()) {
     res.status(400);
@@ -34,9 +51,12 @@ const createShop = asyncHandler(async (req, res) => {
 
   const slug = await Shop.buildUniqueSlug(shopName);
 
-const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
-const safeLayout = ALLOWED_LAYOUTS.includes(homepageLayout) ? homepageLayout : 'default';
-const safeTheme = (themeConfiguration && typeof themeConfiguration === 'object') ? themeConfiguration : {};
+  const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
+  const safeLayout = ALLOWED_LAYOUTS.includes(homepageLayout) ? homepageLayout : 'default';
+  const safeTheme = parseThemeConfiguration(req.body.themeConfiguration, {});
+
+  const logo = req.files?.logo?.[0]?.path || '';
+  const banner = req.files?.banner?.[0]?.path || '';
 
   const shop = await Shop.create({
     seller: req.user._id,
@@ -45,8 +65,8 @@ const safeTheme = (themeConfiguration && typeof themeConfiguration === 'object')
     description: description || '',
     businessCategory: businessCategory || '',
     businessHours: businessHours || '',
-    logo: logo || '',
-    banner: banner || '',
+    logo,
+    banner,
     themeConfiguration: safeTheme,
     homepageLayout: safeLayout,
     status: 'pending_approval',
@@ -82,6 +102,10 @@ const getMyShop = asyncHandler(async (req, res) => {
 // @desc    Seller updates their own shop's basic info. Any update on an already
 //          approved shop sends it back to pending_approval, mirroring the
 //          product edit-while-live behavior.
+//          Logo/banner: only replaced if a new file was actually uploaded in
+//          this request (req.files.logo / req.files.banner) — otherwise the
+//          existing Cloudinary URLs on the shop are left untouched, so the
+//          seller isn't forced to re-upload branding on every edit.
 // @route   PUT /api/shops/my-shop
 // @access  Private (wholesaler, retailer)
 const updateMyShop = asyncHandler(async (req, res) => {
@@ -91,18 +115,24 @@ const updateMyShop = asyncHandler(async (req, res) => {
     throw new Error('You do not have a shop yet');
   }
 
-  const editableFields = ['description', 'businessCategory', 'businessHours', 'logo', 'banner', 'themeConfiguration', 'homepageLayout'];
+  const editableFields = ['description', 'businessCategory', 'businessHours'];
   editableFields.forEach((field) => {
     if (req.body[field] !== undefined) shop[field] = req.body[field];
   });
 
-  if (req.body.themeConfiguration !== undefined && typeof req.body.themeConfiguration === 'object') {
-  shop.themeConfiguration = req.body.themeConfiguration;
-}
-if (req.body.homepageLayout !== undefined) {
-  const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
-  shop.homepageLayout = ALLOWED_LAYOUTS.includes(req.body.homepageLayout) ? req.body.homepageLayout : shop.homepageLayout;
-}
+  if (req.body.themeConfiguration !== undefined) {
+    shop.themeConfiguration = parseThemeConfiguration(req.body.themeConfiguration, shop.themeConfiguration);
+  }
+
+  if (req.body.homepageLayout !== undefined) {
+    const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
+    shop.homepageLayout = ALLOWED_LAYOUTS.includes(req.body.homepageLayout) ? req.body.homepageLayout : shop.homepageLayout;
+  }
+
+  // req.files comes from uploadShopImages (multer .fields), so each key is an
+  // array — only overwrite logo/banner when a new file actually came through.
+  if (req.files?.logo?.[0]) shop.logo = req.files.logo[0].path;
+  if (req.files?.banner?.[0]) shop.banner = req.files.banner[0].path;
 
   if (req.body.shopName !== undefined && req.body.shopName.trim() && req.body.shopName.trim() !== shop.shopName) {
     shop.shopName = req.body.shopName.trim();
