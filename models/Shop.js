@@ -6,6 +6,8 @@ const { Schema } = mongoose;
 //   1. A seller to create one shop (optional)
 //   2. Admin to approve/reject/suspend/reactivate/verify/feature it
 //   3. Product creation to silently attach an approved shop's id to new products
+//   4. Buyers to rate/review the shop (ShopReview model recalculates
+//      ratingsAverage/ratingsCount below)
 //
 // Branding/customization fields (theme, banners, layout, collections, policies,
 // etc. from the full spec) are intentionally left minimal for now and can be
@@ -58,6 +60,10 @@ const shopSchema = new Schema(
       default: 'unverified',
     },
 
+    // --- Ratings (auto-calculated from ShopReview collection) ---
+    ratingsAverage: { type: Number, default: 0, min: 0, max: 5 },
+    ratingsCount: { type: Number, default: 0 },
+
     // Admin-only homepage spotlight toggle. Only ever meaningful on an
     // approved shop — enforced in the controller, not here.
     isFeatured: { type: Boolean, default: false, index: true },
@@ -85,7 +91,7 @@ shopSchema.statics.buildUniqueSlug = async function (shopName, excludeId = null)
 };
 
 // Helpful indexes for the admin table's status/search filters and the
-// (future) public shop directory's featured/verified filters.
+// public shop directory's featured/verified filters.
 shopSchema.index({ status: 1, isActive: 1 });
 shopSchema.index({ shopName: 'text' });
 

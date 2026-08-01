@@ -16,8 +16,9 @@ const {
   adminDeleteShop,
   toggleMyShopActive,
   getPublicShops,
-     getShopBySlug,
+  getShopBySlug,
 } = require('../controllers/shopController');
+const { createShopReview, getShopReviews } = require('../controllers/shopReviewController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadShopImages } = require('../middleware/uploadMiddleware');
 
@@ -46,8 +47,16 @@ router.patch('/admin/:id/verify', protect, authorize('admin'), setShopVerificati
 router.patch('/admin/:id/feature', protect, authorize('admin'), setShopFeatured);
 router.patch('/admin/:id', protect, authorize('admin'), uploadShopImages, adminUpdateShop);
 router.delete('/admin/:id', protect, authorize('admin'), adminDeleteShop);
-router.get('/', getPublicShops);       // GET /api/shops
-router.get('/:slug', getShopBySlug);   // GET /api/shops/:slug
 
+// ---------------- Public ----------------
+router.get('/', getPublicShops);       // GET /api/shops
+
+// ---------------- Shop reviews ----------------
+// Grouped under :shopId (two path segments) so this never collides with the
+// single-segment :slug route below, regardless of declaration order.
+router.post('/:shopId/reviews', protect, authorize('buyer'), createShopReview);
+router.get('/:shopId/reviews', getShopReviews);
+
+router.get('/:slug', getShopBySlug);   // GET /api/shops/:slug
 
 module.exports = router;

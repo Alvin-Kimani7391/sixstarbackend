@@ -354,33 +354,35 @@ const adminDeleteShop = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Shop removed' });
 });
 
-
+// @desc    Public: browse approved shops directory
+// @route   GET /api/shops
+// @access  Public
 const getPublicShops = asyncHandler(async (req, res) => {
   const { search, category, verified, featured, sort, page = 1, limit = 12 } = req.query;
- 
+
   const filter = { status: 'approved', isActive: true };
   if (category) filter.businessCategory = category;
   if (verified === 'true') filter.verificationStatus = 'verified';
   if (featured === 'true') filter.isFeatured = true;
   if (search) filter.$text = { $search: search };
- 
+
   const sortMap = {
     newest: '-createdAt',
     name: 'shopName',
     featured: '-isFeatured -createdAt',
   };
- 
+
   const skip = (Number(page) - 1) * Number(limit);
- 
+
   const [shops, total] = await Promise.all([
     Shop.find(filter)
-      .select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt')
+      .select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt ratingsAverage ratingsCount')
       .sort(sortMap[sort] || sortMap.featured)
       .skip(skip)
       .limit(Number(limit)),
     Shop.countDocuments(filter),
   ]);
- 
+
   // Live "X products" count per shop, cheap at directory scale. If the shop
   // count grows large, swap this for a $lookup in an aggregation pipeline.
   const counts = await Product.aggregate([
@@ -388,7 +390,7 @@ const getPublicShops = asyncHandler(async (req, res) => {
     { $group: { _id: '$shop', count: { $sum: 1 } } },
   ]);
   const countMap = new Map(counts.map((c) => [String(c._id), c.count]));
- 
+
   res.json({
     success: true,
     count: shops.length,
@@ -398,7 +400,7 @@ const getPublicShops = asyncHandler(async (req, res) => {
     shops: shops.map((s) => ({ ...s.toObject(), productCount: countMap.get(String(s._id)) || 0 })),
   });
 });
- 
+
 // @desc    Public: single approved shop by slug, for the shop storefront page
 // @route   GET /api/shops/:slug
 // @access  Public
@@ -407,13 +409,13 @@ const getShopBySlug = asyncHandler(async (req, res) => {
     slug: req.params.slug,
     status: 'approved',
     isActive: true,
-  }).select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt');
- 
+  }).select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt ratingsAverage ratingsCount');
+
   if (!shop) {
     res.status(404);
     throw new Error('Shop not found');
   }
- 
+
   res.json({ success: true, shop });
 });
 
@@ -434,5 +436,5 @@ module.exports = {
   adminDeleteShop,
   toggleMyShopActive,
   getPublicShops,
-     getShopBySlug,
+  getShopBySlug,
 };
