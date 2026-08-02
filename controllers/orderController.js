@@ -27,13 +27,31 @@ function resolveUnitPrice(basePrice, pricingTiers, qty) {
 
 // Wholesale delivery cost for one line, computed straight from the product's own
 // deliveryCharge terms (set by the seller) — never from anything the buyer sends.
+//
+// FIX: this used to ignore product.deliveryType entirely, so a wholesaler's
+// 'simple' (light) product — meant to ship exactly like a retail item via the
+// buyer's regional Transport fee — silently got 0 delivery fee from BOTH this
+// function AND the regional transportFee (because it was never counted as a
+// "retail-like" item below), meaning it shipped with no delivery charge at all.
 function computeWholesaleDeliveryForItem(product, qty) {
   if (product.sellerRole !== 'wholesaler') return { fee: 0, note: '' };
+  if (product.deliveryType === 'simple') return { fee: 0, note: '' }; // handled via regional transportFee instead
   if (product.freeDelivery) return { fee: 0, note: '' };
   const dc = product.deliveryCharge || {};
   if (dc.chargeType === 'fixed') return { fee: Number(dc.amount) || 0, note: '' };
   if (dc.chargeType === 'quantity_based') return { fee: (Number(dc.perUnitAmount) || 0) * qty, note: '' };
   return { fee: 0, note: dc.notes || 'Delivery terms to be agreed directly with the seller' };
+}
+
+// Whether a product needs a courier-visible delivery address, i.e. the seller
+// negotiates delivery directly rather than it riding a fixed courier fee.
+function isNegotiatedDelivery(product) {
+  return (
+    product.sellerRole === 'wholesaler' &&
+    product.deliveryType === 'heavy' &&
+    !product.freeDelivery &&
+    product.deliveryCharge?.chargeType === 'negotiated'
+  );
 }
 
 // Best-effort admin recipient list: explicit env override first, otherwise every
@@ -70,7 +88,8 @@ const createOrder = asyncHandler(async (req, res) => {
   // If item #4 fails validation we don't want items #1-3's stock already decremented.
   let itemsTotal = 0;
   let wholesaleDeliveryTotal = 0;
-  let hasRetailItem = false;
+  let hasRetailItem = false; // true if ANY item rides the regional transportFee (retail, or wholesale 'simple')
+  let hasNegotiatedItem = false;
   const deliveryNotes = [];
   const prepared = []; // { product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee }
 
@@ -84,14 +103,27 @@ const createOrder = asyncHandler(async (req, res) => {
     const quantity = Math.max(1, Number(reqItem.quantity) || 1);
 
     // --- Wholesale MOQ, enforced here regardless of what the client sent ---
+    // (MOQ applies to every wholesale product, 'simple' or 'heavy' delivery alike.)
     if (product.sellerRole === 'wholesaler') {
       const moq = product.minOrderQuantity || 1;
       if (quantity < moq) {
         res.status(400);
         throw new Error(`"${product.name}" requires a minimum order of ${moq} units`);
       }
+      // FIX: a 'simple' wholesale product ships exactly like a retail item — it
+      // must count towards hasRetailItem so the regional transportFee actually
+      // gets applied to it. Previously only sellerRole was checked here, so
+      // 'simple' wholesale items got neither a wholesale delivery fee NOR the
+      // regional transport fee — i.e. free delivery by accident.
+      if (product.deliveryType === 'simple') {
+        hasRetailItem = true;
+      }
     } else {
       hasRetailItem = true;
+    }
+
+    if (isNegotiatedDelivery(product)) {
+      hasNegotiatedItem = true;
     }
 
     // --- Does this product's category require a variant selection (e.g. Color/Size)? ---
@@ -149,6 +181,19 @@ const createOrder = asyncHandler(async (req, res) => {
     prepared.push({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee: fee });
   }
 
+  // --- If any item needs delivery negotiated directly with the seller, the buyer
+  // MUST have supplied a real address/landmark — otherwise the seller has nothing
+  // to negotiate against. Mirrors the frontend check but is authoritative here. ---
+  if (hasNegotiatedItem) {
+    const addressDetail = (shippingAddress?.notes || shippingAddress?.address || '').trim();
+    if (addressDetail.length < 8) {
+      res.status(400);
+      throw new Error(
+        'One or more items in your order require delivery to be arranged directly with the seller. Please provide a delivery address or landmark.'
+      );
+    }
+  }
+
   // ---------------- PASS 2: everything validated — now commit stock + build order ----------------
   const orderItems = prepared.map(({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee }) => ({
     product: product._id,
@@ -173,7 +218,9 @@ const createOrder = asyncHandler(async (req, res) => {
 
   // --- Retail transport (region/town) — no server-side rate table yet, so this
   // stays client-supplied like shippingAddress, just sanity-clamped to >= 0.
-  // Wholesale delivery above is fully server-computed and authoritative. ---
+  // Now correctly applies whenever hasRetailItem is true, which includes both
+  // true retail items AND 'simple' (light) wholesale items.
+  // Wholesale 'heavy' delivery above is fully server-computed and authoritative. ---
   const retailTransportFee = hasRetailItem ? Math.max(0, Number(transportFee) || 0) : 0;
   const deliveryFeeTotal = retailTransportFee + wholesaleDeliveryTotal;
   const totalAmount = itemsTotal + deliveryFeeTotal;
