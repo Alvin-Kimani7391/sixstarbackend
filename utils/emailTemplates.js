@@ -218,15 +218,6 @@ function passwordResetEmailTemplate(name, resetUrl) {
   });
 }
 
-
-
-/* ================================================================
-   ADD THIS to utils/emailTemplates.js
-   1. Paste the function anywhere among the other template functions
-      (e.g. right after passwordResetEmailTemplate).
-   2. Add `emailOtpTemplate` to the module.exports object at the bottom.
-   ================================================================ */
-
 function emailOtpTemplate({ name, code }) {
   const digits = String(code).split('');
   const digitBoxes = digits
@@ -260,10 +251,6 @@ function emailOtpTemplate({ name, code }) {
     bodyHtml,
   });
 }
-
-/* Add to module.exports:
-   emailOtpTemplate,
-*/
 
 /* ================================================================ */
 /* ORDER EMAILS (buyer / seller / admin)                             */
@@ -532,6 +519,7 @@ module.exports = {
   // auth
   welcomeEmailTemplate,
   passwordResetEmailTemplate,
+  emailOtpTemplate, // <-- THE FIX: this line was missing, so require(...).emailOtpTemplate was undefined
 
   // orders
   orderConfirmationTemplate,
