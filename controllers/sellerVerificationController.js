@@ -3,6 +3,9 @@ const SellerVerification = require('../models/SellerVerification');
 const LegalDocument = require('../models/LegalDocument');
 const SellerAcceptance = require('../models/SellerAcceptance');
 
+const CATEGORY_OPTIONS = SellerVerification.CATEGORY_OPTIONS;
+const BUSINESS_AGE_OPTIONS = ['lt_6m', '6_12m', '1_3y', 'gt_3y'];
+
 // @desc  Get logged-in seller's verification record
 // @route GET /api/seller-verification/me
 const getMyVerification = asyncHandler(async (req, res) => {
@@ -18,6 +21,9 @@ const getMyVerification = asyncHandler(async (req, res) => {
     verification: record || null,
     // Wholesalers never see the basic ID+KRA-only path — that's retailer-only.
     eligibleTiers: req.user.role === 'wholesaler' ? ['business'] : ['basic', 'business'],
+    emailVerified: !!req.user.isVerified,
+    email: req.user.email,
+    categoryOptions: CATEGORY_OPTIONS,
   });
 });
 
@@ -27,6 +33,12 @@ const submitVerification = asyncHandler(async (req, res) => {
   if (!['retailer', 'wholesaler'].includes(req.user.role)) {
     res.status(403);
     throw new Error('Only sellers can submit verification');
+  }
+
+  // ---- Email must be verified before anything else is accepted ----
+  if (!req.user.isVerified) {
+    res.status(400);
+    throw new Error('Please verify your email address before submitting your documents');
   }
 
   const requiredDocs = await LegalDocument.find({
@@ -73,6 +85,21 @@ const submitVerification = asyncHandler(async (req, res) => {
     throw new Error('You must accept the seller agreement to continue');
   }
 
+  // categories may arrive as a JSON string, a comma list, or repeated fields
+  let categories = [];
+  if (req.body.categories) {
+    try {
+      categories = Array.isArray(req.body.categories)
+        ? req.body.categories
+        : JSON.parse(req.body.categories);
+    } catch {
+      categories = String(req.body.categories).split(',').map((c) => c.trim()).filter(Boolean);
+    }
+  }
+  categories = categories.filter((c) => CATEGORY_OPTIONS.includes(c));
+
+  const sameAsBusiness = req.body.warehouseSameAsBusiness !== 'false';
+
   const payload = {
     seller: req.user.id,
     sellerRole: req.user.role,
@@ -81,9 +108,17 @@ const submitVerification = asyncHandler(async (req, res) => {
     submittedAt: new Date(),
     rejectionReason: undefined,
 
+    emailVerification: {
+      email: req.user.email,
+      verified: true,
+      verifiedAt: existing?.emailVerification?.verifiedAt || new Date(),
+    },
+
     identity: {
       idType: req.body.idType,
       fullName: req.body.fullName,
+      dateOfBirth: req.body.dateOfBirth || undefined,
+      nationality: req.body.nationality,
       idNumber: req.body.idNumber,
       idFrontImage: fileUrl('idFrontImage') || existing?.identity?.idFrontImage,
       idBackImage: fileUrl('idBackImage') || existing?.identity?.idBackImage,
@@ -97,12 +132,46 @@ const submitVerification = asyncHandler(async (req, res) => {
       vatCertificate: fileUrl('vatCertificate') || existing?.tax?.vatCertificate,
     },
 
-    address: {
+    businessAddress: {
       county: req.body.county,
       city: req.body.city,
       street: req.body.street,
       building: req.body.building,
       postalCode: req.body.postalCode,
+    },
+
+    warehouseAddress: {
+      sameAsBusiness,
+      warehouseName: sameAsBusiness ? undefined : req.body.warehouseName,
+      county: sameAsBusiness ? req.body.county : req.body.warehouseCounty,
+      city: sameAsBusiness ? req.body.city : req.body.warehouseCity,
+      street: sameAsBusiness ? req.body.street : req.body.warehouseStreet,
+      building: sameAsBusiness ? req.body.building : req.body.warehouseBuilding,
+      mapLink: sameAsBusiness ? undefined : req.body.warehouseMapLink,
+    },
+
+    returnAddress: {
+      recipientName: req.body.returnRecipientName,
+      county: req.body.returnCounty,
+      city: req.body.returnCity,
+      street: req.body.returnStreet,
+      postalCode: req.body.returnPostalCode,
+    },
+
+    store: {
+      storeName: req.body.storeName,
+      storeLogo: fileUrl('storeLogo') || existing?.store?.storeLogo,
+      storeBanner: fileUrl('storeBanner') || existing?.store?.storeBanner,
+      storeDescription: (req.body.storeDescription || '').slice(0, 500),
+    },
+
+    categories,
+
+    social: {
+      website: req.body.website,
+      facebook: req.body.facebook,
+      instagram: req.body.instagram,
+      tiktok: req.body.tiktok,
     },
 
     payout: {
@@ -127,6 +196,8 @@ const submitVerification = asyncHandler(async (req, res) => {
       registrationCertificate: fileUrl('registrationCertificate') || existing?.business?.registrationCertificate,
       cr12Document: fileUrl('cr12Document') || existing?.business?.cr12Document,
       partnershipAgreement: fileUrl('partnershipAgreement') || existing?.business?.partnershipAgreement,
+      businessAge: BUSINESS_AGE_OPTIONS.includes(req.body.businessAge) ? req.body.businessAge : undefined,
+      businessLicense: fileUrl('businessLicenseDoc') || existing?.business?.businessLicense,
     };
     if (!payload.business.businessName || !payload.business.classification) {
       res.status(400);
@@ -135,6 +206,14 @@ const submitVerification = asyncHandler(async (req, res) => {
     if (!payload.business.registrationCertificate) {
       res.status(400);
       throw new Error('Business registration certificate is required for the business tier');
+    }
+    if (payload.business.classification === 'limited_company' && !payload.business.cr12Document) {
+      res.status(400);
+      throw new Error('CR12 is required for limited companies');
+    }
+    if (payload.business.classification === 'partnership' && !payload.business.partnershipAgreement) {
+      res.status(400);
+      throw new Error('Partnership agreement is required for partnerships');
     }
   }
 
@@ -145,9 +224,37 @@ const submitVerification = asyncHandler(async (req, res) => {
     }
   }
 
+  if (!payload.identity.fullName || !payload.identity.dateOfBirth || !payload.identity.nationality) {
+    res.status(400);
+    throw new Error('Full name, date of birth and nationality are required');
+  }
+  if (!payload.identity.selfieWithId) {
+    res.status(400);
+    throw new Error('A selfie holding your ID is required');
+  }
   if (!payload.tax.kraPinNumber || !payload.tax.kraPinCertificate) {
     res.status(400);
     throw new Error('KRA PIN number and certificate are required');
+  }
+  if (payload.tax.vatRegistered && !payload.tax.vatCertificate) {
+    res.status(400);
+    throw new Error('Upload your VAT registration certificate, or untick VAT registered');
+  }
+  if (!payload.businessAddress.county) {
+    res.status(400);
+    throw new Error('Business county is required');
+  }
+  if (!payload.returnAddress.recipientName || !payload.returnAddress.county) {
+    res.status(400);
+    throw new Error('A return address (recipient name and county) is required');
+  }
+  if (!payload.store.storeName) {
+    res.status(400);
+    throw new Error('Store name is required');
+  }
+  if (!payload.categories.length) {
+    res.status(400);
+    throw new Error('Select at least one product category');
   }
   if (!payload.payout.method) {
     res.status(400);

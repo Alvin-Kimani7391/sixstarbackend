@@ -115,14 +115,23 @@ const adminDeleteProduct = asyncHandler(async (req, res) => {
 //          NOW populates items.product / items.seller / agent so the admin
 //          panel's expandable order row can show buyer, seller-per-item,
 //          agent, and commission without extra round trips.
-// @route   GET /api/admin/orders?paymentStatus=confirmed&orderStatus=processing
+//
+//          Also accepts an optional ?sellerId= filter — used by the Seller
+//          Verification modal to pull "this seller's orders" so the admin
+//          can review fulfillment history and pickup location alongside
+//          identity/business/tax documents in one place.
+// @route   GET /api/admin/orders?paymentStatus=confirmed&orderStatus=processing&sellerId=...
 // @access  Private (admin)
 const getAllOrdersAdmin = asyncHandler(async (req, res) => {
-  const { paymentStatus, orderStatus, page = 1, limit = 20 } = req.query;
+  const { paymentStatus, orderStatus, sellerId, page = 1, limit = 20 } = req.query;
 
   const filter = {};
   if (paymentStatus) filter.paymentStatus = paymentStatus;
   if (orderStatus) filter.orderStatus = orderStatus;
+  // Matches any order that has at least one line item sold by this seller —
+  // the item-level breakdown (still populated below) is what actually
+  // isolates that seller's items on the frontend.
+  if (sellerId) filter.items = { $elemMatch: { seller: sellerId } };
 
   const skip = (Number(page) - 1) * Number(limit);
 

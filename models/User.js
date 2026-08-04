@@ -39,6 +39,10 @@ const userSchema = new Schema(
       select: false,
     },
     avatar: { type: String, default: '' },
+
+    // Doubles as the "email verified" flag used to gate seller-verification
+    // submission. Google sign-ups get this for free (Google already verified
+    // the address); everyone else has to complete the OTP flow below.
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true }, // admin can suspend an account
 
@@ -48,6 +52,13 @@ const userSchema = new Schema(
     // ---------- Forgot / reset password ----------
     resetPasswordToken: { type: String, select: false },
     resetPasswordExpire: { type: Date, select: false },
+
+    // ---------- Email verification OTP (seller onboarding gate, also usable
+    // for general account email confirmation) ----------
+    emailOtpHash: { type: String, select: false },
+    emailOtpExpire: { type: Date, select: false },
+    emailOtpAttempts: { type: Number, default: 0, select: false },
+    emailOtpLastSentAt: { type: Date, select: false },
 
     // ---------- Login lockout (brute-force protection) ----------
     failedLoginAttempts: { type: Number, default: 0, select: false },

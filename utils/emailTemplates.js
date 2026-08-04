@@ -218,6 +218,53 @@ function passwordResetEmailTemplate(name, resetUrl) {
   });
 }
 
+
+
+/* ================================================================
+   ADD THIS to utils/emailTemplates.js
+   1. Paste the function anywhere among the other template functions
+      (e.g. right after passwordResetEmailTemplate).
+   2. Add `emailOtpTemplate` to the module.exports object at the bottom.
+   ================================================================ */
+
+function emailOtpTemplate({ name, code }) {
+  const digits = String(code).split('');
+  const digitBoxes = digits
+    .map(
+      (d) => `<td style="padding:0 4px;">
+        <div style="width:40px;height:48px;border-radius:8px;background:${COLORS.chip};border:1px solid ${COLORS.border};
+          display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:${COLORS.ink};font-family:monospace;">
+          ${d}
+        </div>
+      </td>`
+    )
+    .join('');
+
+  const bodyHtml = `
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:12px auto 20px;">
+      <tr>${digitBoxes}</tr>
+    </table>
+    <p style="text-align:center;margin:0 0 4px;font-size:13px;color:${COLORS.muted};">
+      This code expires in <strong>10 minutes</strong>.
+    </p>
+    <p style="margin:20px 0 0;font-size:13px;color:${COLORS.muted};line-height:1.6;">
+      If you didn't request this, you can safely ignore this email.
+    </p>
+  `;
+
+  return baseLayout({
+    preheader: `Your verification code is ${code}`,
+    eyebrow: 'Email Verification',
+    title: 'Verify Your Email',
+    intro: `Hi ${name?.split(' ')[0] || 'there'}, enter this code to continue your seller onboarding.`,
+    bodyHtml,
+  });
+}
+
+/* Add to module.exports:
+   emailOtpTemplate,
+*/
+
 /* ================================================================ */
 /* ORDER EMAILS (buyer / seller / admin)                             */
 /* ================================================================ */

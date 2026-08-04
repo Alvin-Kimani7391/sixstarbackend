@@ -57,6 +57,11 @@ const uploadShopImages = uploadShop.fields([
 // and PDFs delivered as 'image' resource type get the correct file extension
 // and content-type appended automatically, so they open/preview correctly in
 // a browser tab. This is why these have always worked fine.
+//
+// Extended for the dynamic onboarding wizard: county business permit
+// (businessLicenseDoc, optional) and store branding (storeLogo / storeBanner,
+// both optional) now ride along in the same multipart request as the rest of
+// the verification docs, so the wizard can submit everything in one POST.
 // ---------------------------------------------------------------------------
 const verificationStorage = new CloudinaryStorage({
   cloudinary,
@@ -81,6 +86,9 @@ const uploadVerificationDocs = uploadVerification.fields([
   { name: 'registrationCertificate', maxCount: 1 },
   { name: 'cr12Document', maxCount: 1 },
   { name: 'partnershipAgreement', maxCount: 1 },
+  { name: 'businessLicenseDoc', maxCount: 1 }, // county business permit — optional
+  { name: 'storeLogo', maxCount: 1 }, // store profile branding — optional
+  { name: 'storeBanner', maxCount: 1 }, // store profile branding — optional
 ]);
 
 // ---------------------------------------------------------------------------
