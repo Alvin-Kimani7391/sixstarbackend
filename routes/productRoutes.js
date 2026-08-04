@@ -28,7 +28,7 @@ router.get('/:id', getProductById);
 router.get('/:productId/reviews', getProductReviews);
 
 router.post('/', protect, requireApprovedSeller, uploadProductImages, createProduct);
-router.patch('/:id/submit', protect, requireApprovedSeller, submitProduct);
+router.patch('/:id/submit', protect, requireApprovedSeller, submitProductForReview);
 
 // Public view-tracking ping fired once per product-detail-page load (guests included —
 // no `protect` here, req.user is simply undefined for them and the view still counts).
