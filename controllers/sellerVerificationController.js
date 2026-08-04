@@ -30,24 +30,24 @@ const submitVerification = asyncHandler(async (req, res) => {
   }
 
   const requiredDocs = await LegalDocument.find({
-  status: 'published',
-  isMandatory: true,
-  audience: { $in: ['sellers', 'both'] },
-}).select('_id title');
+    status: 'published',
+    isMandatory: true,
+    audience: { $in: ['sellers', 'both'] },
+  }).select('_id title');
 
-if (requiredDocs.length) {
-  const acceptedIds = await SellerAcceptance.find({
-    seller: req.user.id,
-    document: { $in: requiredDocs.map((d) => d._id) },
-  }).distinct('document');
-  const acceptedSet = new Set(acceptedIds.map(String));
-  const missing = requiredDocs.filter((d) => !acceptedSet.has(String(d._id)));
+  if (requiredDocs.length) {
+    const acceptedIds = await SellerAcceptance.find({
+      seller: req.user.id,
+      document: { $in: requiredDocs.map((d) => d._id) },
+    }).distinct('document');
+    const acceptedSet = new Set(acceptedIds.map(String));
+    const missing = requiredDocs.filter((d) => !acceptedSet.has(String(d._id)));
 
-  if (missing.length) {
-    res.status(400);
-    throw new Error(`Accept the following before submitting: ${missing.map((d) => d.title).join(', ')}`);
+    if (missing.length) {
+      res.status(400);
+      throw new Error(`Accept the following before submitting: ${missing.map((d) => d.title).join(', ')}`);
+    }
   }
-}
 
   const existing = await SellerVerification.findOne({ seller: req.user.id });
   if (existing && existing.status === 'approved') {
@@ -60,7 +60,7 @@ if (requiredDocs.length) {
   }
 
   const files = req.files || {};
-  const fileUrl = (field) => (files[field]?.[0]?.path);
+  const fileUrl = (field) => files[field]?.[0]?.path;
 
   // Wholesalers are always forced onto the business tier no matter what the
   // client sends — the lightweight ID+KRA path is for small retailers only.
@@ -168,6 +168,23 @@ if (requiredDocs.length) {
 // ============================================================
 // ADMIN
 // ============================================================
+
+// @desc  Full list of verification records, optionally filtered by status
+// @route GET /api/admin/seller-verifications?status=pending
+const getAllVerifications = asyncHandler(async (req, res) => {
+  const { status } = req.query;
+  const filter = {};
+  if (status) filter.status = status;
+
+  const records = await SellerVerification.find(filter)
+    .populate('seller', 'name email phone role businessName shopName')
+    .sort({ submittedAt: -1, updatedAt: -1 });
+
+  res.json({ success: true, verifications: records });
+});
+
+// @desc  Pending-only shortcut (kept for backward compatibility)
+// @route GET /api/admin/seller-verifications/pending
 const getPendingVerifications = asyncHandler(async (req, res) => {
   const records = await SellerVerification.find({ status: 'pending' })
     .populate('seller', 'name email phone role businessName shopName')
@@ -202,6 +219,7 @@ const rejectVerification = asyncHandler(async (req, res) => {
 module.exports = {
   getMyVerification,
   submitVerification,
+  getAllVerifications,
   getPendingVerifications,
   approveVerification,
   rejectVerification,
