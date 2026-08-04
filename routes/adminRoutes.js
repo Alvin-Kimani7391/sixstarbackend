@@ -29,6 +29,37 @@ const { getAllAgentsAdmin } = require('../controllers2/agentController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages } = require('../middleware/uploadMiddleware');
 
+
+const {
+  getPendingVerifications,
+  approveVerification,
+  rejectVerification,
+} = require('../controllers/sellerVerificationController');
+
+router.get('/seller-verifications/pending', protect, admin, getPendingVerifications);
+router.patch('/seller-verifications/:id/approve', protect, admin, approveVerification);
+router.patch('/seller-verifications/:id/reject', protect, admin, rejectVerification);
+
+const {
+  createLegalDocument,
+  getAllLegalDocumentsAdmin,
+  updateLegalDocument,
+  publishLegalDocument,
+  archiveLegalDocument,
+  deleteLegalDocument,
+  getDocumentAcceptances,
+} = require('../controllers/legalDocumentController');
+const { uploadLegalDocument } = require('../middleware/uploadMiddleware');
+
+// Legal document management (Terms, Seller Agreement, policies, etc.)
+router.get('/legal-documents', getAllLegalDocumentsAdmin);
+router.post('/legal-documents', uploadLegalDocument, createLegalDocument);
+router.patch('/legal-documents/:id', uploadLegalDocument, updateLegalDocument);
+router.patch('/legal-documents/:id/publish', publishLegalDocument);
+router.patch('/legal-documents/:id/archive', archiveLegalDocument);
+router.delete('/legal-documents/:id', deleteLegalDocument);
+router.get('/legal-documents/:id/acceptances', getDocumentAcceptances);
+
 // Every route here is admin-only
 router.use(protect, authorize('admin'));
 

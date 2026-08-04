@@ -64,6 +64,10 @@ app.use('/api/agents', require('./routes/agentRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/shops', require('./routes/shopRoutes'));
 app.use('/api/shop-reviews', require('./routes/shopReviewRoutes'));
+app.use('/api/seller-verification', require('./routes/sellerVerificationRoutes'));
+
+app.set('trust proxy', 1);
+app.use('/api/legal-documents', require('./routes/legalDocumentRoutes'));
 
 // --- Error handling (must be last) ---
 app.use(notFound);

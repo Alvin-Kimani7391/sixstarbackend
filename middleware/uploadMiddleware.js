@@ -49,4 +49,56 @@ const uploadShopImages = uploadShop.fields([
   { name: 'banner', maxCount: 1 },
 ]);
 
-module.exports = { uploadProductImages, uploadSingleImage, uploadShopImages };
+// ---------------------------------------------------------------------------
+// Seller verification docs: separate folder, PDFs allowed (registration certs,
+// CR12 etc. are often scanned as PDF), several optional single-file fields.
+// ---------------------------------------------------------------------------
+const verificationStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'ivh-marketplace/verification',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'pdf'],
+    transformation: [{ width: 1600, height: 1600, crop: 'limit' }],
+  },
+});
+
+const uploadVerification = multer({
+  storage: verificationStorage,
+  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB — some scanned PDFs run larger
+});
+
+const uploadVerificationDocs = uploadVerification.fields([
+  { name: 'idFrontImage', maxCount: 1 },
+  { name: 'idBackImage', maxCount: 1 },
+  { name: 'selfieWithId', maxCount: 1 },
+  { name: 'kraPinCertificate', maxCount: 1 },
+  { name: 'vatCertificate', maxCount: 1 },
+  { name: 'registrationCertificate', maxCount: 1 },
+  { name: 'cr12Document', maxCount: 1 },
+  { name: 'partnershipAgreement', maxCount: 1 },
+]);
+
+const legalDocStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'ivh-marketplace/legal',
+    allowed_formats: ['pdf'],
+    resource_type: 'raw',
+  },
+});
+
+const uploadLegalDoc = multer({
+  storage: legalDocStorage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+const uploadLegalDocument = uploadLegalDoc.single('file');
+
+module.exports = {
+  uploadProductImages,
+  uploadSingleImage,
+  uploadShopImages,
+  uploadVerificationDocs,
+  uploadLegalDocument,
+};
+
