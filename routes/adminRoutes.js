@@ -36,9 +36,9 @@ const {
   rejectVerification,
 } = require('../controllers/sellerVerificationController');
 
-router.get('/seller-verifications/pending', protect, admin, getPendingVerifications);
-router.patch('/seller-verifications/:id/approve', protect, admin, approveVerification);
-router.patch('/seller-verifications/:id/reject', protect, admin, rejectVerification);
+router.get('/seller-verifications/pending', protect, authorize('admin'), getPendingVerifications);
+router.patch('/seller-verifications/:id/approve', protect, authorize('admin'), approveVerification);
+router.patch('/seller-verifications/:id/reject', protect, authorize('admin'), rejectVerification);
 
 const {
   createLegalDocument,
