@@ -52,6 +52,11 @@ const uploadShopImages = uploadShop.fields([
 // ---------------------------------------------------------------------------
 // Seller verification docs: separate folder, PDFs allowed (registration certs,
 // CR12 etc. are often scanned as PDF), several optional single-file fields.
+//
+// NOTE: no resource_type set here on purpose — Cloudinary defaults to 'image',
+// and PDFs delivered as 'image' resource type get the correct file extension
+// and content-type appended automatically, so they open/preview correctly in
+// a browser tab. This is why these have always worked fine.
 // ---------------------------------------------------------------------------
 const verificationStorage = new CloudinaryStorage({
   cloudinary,
@@ -78,12 +83,23 @@ const uploadVerificationDocs = uploadVerification.fields([
   { name: 'partnershipAgreement', maxCount: 1 },
 ]);
 
+// ---------------------------------------------------------------------------
+// Legal documents (Terms, Seller Agreement, policies): PDF only.
+//
+// FIX: this previously used `resource_type: 'raw'`, which is what was
+// breaking document viewing. Raw delivery on Cloudinary doesn't reliably
+// carry the .pdf extension or a correct Content-Type through to the final
+// URL, so browsers either failed to render it inline or downloaded a file
+// with no extension. Switching to 'auto' lets Cloudinary treat the PDF as
+// image-deliverable content (same as verificationStorage above), which
+// preserves the extension/content-type and opens correctly in a new tab.
+// ---------------------------------------------------------------------------
 const legalDocStorage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder: 'ivh-marketplace/legal',
     allowed_formats: ['pdf'],
-    resource_type: 'raw',
+    resource_type: 'auto',
   },
 });
 
@@ -101,4 +117,3 @@ module.exports = {
   uploadVerificationDocs,
   uploadLegalDocument,
 };
-
