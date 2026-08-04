@@ -14,7 +14,7 @@ const {
 const { createReview, getProductReviews } = require('../controllers/reviewController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages } = require('../middleware/uploadMiddleware');
-const{ requireApprovedSeller } = require('../middleware/sellerMiddleware');
+const{ requireApprovedSeller } = require('../middleware/verificationMiddleware');
 // Public storefront
 router.get('/', getProducts);
 
