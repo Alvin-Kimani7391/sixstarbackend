@@ -60,6 +60,13 @@ const userSchema = new Schema(
     emailOtpAttempts: { type: Number, default: 0, select: false },
     emailOtpLastSentAt: { type: Date, select: false },
 
+    // ---------- Login-time OTP (separate from the onboarding email-verify OTP
+    // above — this one gates every login attempt for APPROVED sellers only) ----------
+    loginOtpHash: { type: String, select: false },
+    loginOtpExpire: { type: Date, select: false },
+    loginOtpAttempts: { type: Number, default: 0, select: false },
+    loginOtpLastSentAt: { type: Date, select: false },
+
     // ---------- Login lockout (brute-force protection) ----------
     failedLoginAttempts: { type: Number, default: 0, select: false },
     lockUntil: { type: Date, select: false },

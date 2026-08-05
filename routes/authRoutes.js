@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
-
+const { protect } = require('../middleware/authMiddleware');
 const {
   registerUser,
   loginUser,
+  verifyLoginOtp,
+  resendLoginOtp,
   googleAuth,
   forgotPassword,
   resetPassword,
@@ -12,17 +14,14 @@ const {
   updateMe,
 } = require('../controllers/authController');
 
-const { protect } = require('../middleware/authMiddleware');
-const { loginLimiter, registerLimiter, forgotPasswordLimiter } = require('../middleware/rateLimiter');
-
-router.post('/register', registerLimiter, registerUser);
-router.post('/login', loginLimiter, loginUser);
-router.post('/google', loginLimiter, googleAuth);
-
-router.post('/forgot-password', forgotPasswordLimiter, forgotPassword);
+router.post('/register', registerUser);
+router.post('/login', loginUser);
+router.post('/login/verify-otp', verifyLoginOtp);
+router.post('/login/resend-otp', resendLoginOtp);
+router.post('/google', googleAuth);
+router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
-
-router.post('/logout', logoutUser);
+router.post('/logout', protect, logoutUser);
 router.get('/me', protect, getMe);
 router.put('/me', protect, updateMe);
 

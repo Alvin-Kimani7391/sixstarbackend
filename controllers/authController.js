@@ -1,12 +1,15 @@
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 const { OAuth2Client } = require('google-auth-library');
 const { User, Wholesaler, Retailer, Buyer, Admin } = require('../models/User');
+const SellerVerification = require('../models/SellerVerification');
 const generateToken = require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
 const {
   passwordResetEmailTemplate,
   welcomeEmailTemplate,
+  emailOtpTemplate,
 } = require('../utils/emailTemplates');
 
 const roleModelMap = { wholesaler: Wholesaler, retailer: Retailer, buyer: Buyer, admin: Admin };
@@ -15,6 +18,50 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCK_TIME_MS = 15 * 60 * 1000; // 15 minutes
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// ---------- Login OTP config (approved sellers only) ----------
+const LOGIN_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const LOGIN_OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute
+const LOGIN_OTP_MAX_ATTEMPTS = 5;
+
+function generateOtp() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+
+// Short-lived, purpose-scoped JWT that identifies which pending login this
+// OTP belongs to. It is NOT a session token — it can only be exchanged for
+// one via /auth/login/verify-otp, and it never touches a cookie.
+function signLoginOtpToken(userId) {
+  return jwt.sign({ id: userId, purpose: 'login_otp' }, process.env.JWT_SECRET, { expiresIn: '10m' });
+}
+
+function decodeLoginOtpToken(token) {
+  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  if (decoded.purpose !== 'login_otp') throw new Error('Invalid verification session');
+  return decoded;
+}
+
+function maskEmail(email) {
+  const [local, domain] = String(email).split('@');
+  if (!local || !domain) return email;
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}${'*'.repeat(Math.max(local.length - 2, 1))}@${domain}`;
+}
+
+async function issueLoginOtp(user) {
+  const code = generateOtp();
+  user.loginOtpHash = crypto.createHash('sha256').update(code).digest('hex');
+  user.loginOtpExpire = new Date(Date.now() + LOGIN_OTP_TTL_MS);
+  user.loginOtpAttempts = 0;
+  user.loginOtpLastSentAt = new Date();
+  await user.save({ validateBeforeSave: false });
+
+  await sendEmail({
+    to: user.email,
+    subject: 'Your login verification code — Six Star Suppliers',
+    html: emailOtpTemplate({ name: user.name, code }),
+  });
+}
 
 // Fire-and-forget helper — a failed welcome email should never break signup.
 function sendWelcomeEmail(user) {
@@ -36,7 +83,6 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new Error('Please provide name, email, phone, password, and role');
   }
 
-  // Public registration should never allow creating an admin account
   if (!['wholesaler', 'retailer', 'buyer'].includes(role)) {
     res.status(400);
     throw new Error('Invalid role. Must be wholesaler, retailer, or buyer');
@@ -48,7 +94,6 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new Error('An account with this email already exists');
   }
 
-  // Role-specific required fields
   if ((role === 'wholesaler' || role === 'retailer') && !rest.location) {
     res.status(400);
     throw new Error('Business location is required');
@@ -75,7 +120,8 @@ const registerUser = asyncHandler(async (req, res) => {
   sendWelcomeEmail(user);
 });
 
-// @desc    Login any user type
+// @desc    Login any user type — sellers whose verification is APPROVED
+//          are stopped for a login OTP before a session is issued.
 // @route   POST /api/auth/login
 // @access  Public
 const loginUser = asyncHandler(async (req, res) => {
@@ -90,8 +136,6 @@ const loginUser = asyncHandler(async (req, res) => {
     '+password +failedLoginAttempts +lockUntil +googleId'
   );
 
-  // Same generic message whether the email doesn't exist or the password is wrong —
-  // never reveal which one it was.
   if (!user) {
     res.status(401);
     throw new Error('Invalid email or password');
@@ -99,7 +143,7 @@ const loginUser = asyncHandler(async (req, res) => {
 
   if (user.isLocked()) {
     const minutesLeft = Math.ceil((user.lockUntil - Date.now()) / 60000);
-    res.status(423); // Locked
+    res.status(423);
     throw new Error(`Too many failed attempts. Please try again in ${minutesLeft} minute(s).`);
   }
 
@@ -127,14 +171,152 @@ const loginUser = asyncHandler(async (req, res) => {
     throw new Error('This account has been suspended. Contact support.');
   }
 
-  // Successful login — reset lockout counters
+  // Password is correct — reset lockout counters regardless of what happens next.
   user.failedLoginAttempts = 0;
   user.lockUntil = undefined;
   await user.save({ validateBeforeSave: false });
 
-  generateToken(res, user._id);
+  // ---------- Login-OTP gate: only for sellers with an APPROVED verification ----------
+  const isSellerRole = ['wholesaler', 'retailer'].includes(user.role);
+  let requiresLoginOtp = false;
 
+  if (isSellerRole) {
+    const approvedVerification = await SellerVerification.findOne({
+      seller: user._id,
+      status: 'approved',
+    }).select('_id');
+    requiresLoginOtp = !!approvedVerification;
+  }
+
+  if (requiresLoginOtp) {
+    try {
+      await issueLoginOtp(user);
+    } catch (err) {
+      console.error('Login OTP email failed:', err.response?.body || err.message);
+      res.status(500);
+      throw new Error('Could not send your login verification code. Please try again shortly.');
+    }
+
+    return res.json({
+      success: true,
+      otpRequired: true,
+      otpToken: signLoginOtpToken(user._id),
+      maskedEmail: maskEmail(user.email),
+    });
+  }
+
+  generateToken(res, user._id);
   res.json({ success: true, user: sanitizeUser(user) });
+});
+
+// @desc    Complete a login by verifying the code emailed to an approved seller
+// @route   POST /api/auth/login/verify-otp
+// @access  Public (guarded by the short-lived otpToken, not a session)
+const verifyLoginOtp = asyncHandler(async (req, res) => {
+  const { otpToken, code } = req.body;
+
+  if (!otpToken || !code) {
+    res.status(400);
+    throw new Error('Enter the code we emailed you');
+  }
+
+  let decoded;
+  try {
+    decoded = decodeLoginOtpToken(otpToken);
+  } catch {
+    res.status(400);
+    throw new Error('Your verification session has expired. Please log in again.');
+  }
+
+  const user = await User.findById(decoded.id).select(
+    '+loginOtpHash +loginOtpExpire +loginOtpAttempts'
+  );
+
+  if (!user) {
+    res.status(401);
+    throw new Error('Account not found');
+  }
+  if (!user.isActive) {
+    res.status(403);
+    throw new Error('This account has been suspended. Contact support.');
+  }
+
+  if (!user.loginOtpHash || !user.loginOtpExpire || user.loginOtpExpire < new Date()) {
+    res.status(400);
+    throw new Error('This code has expired. Please request a new one.');
+  }
+
+  if (user.loginOtpAttempts >= LOGIN_OTP_MAX_ATTEMPTS) {
+    res.status(429);
+    throw new Error('Too many incorrect attempts. Please request a new code.');
+  }
+
+  const hashed = crypto.createHash('sha256').update(String(code).trim()).digest('hex');
+  if (hashed !== user.loginOtpHash) {
+    user.loginOtpAttempts += 1;
+    await user.save({ validateBeforeSave: false });
+    res.status(400);
+    throw new Error('Incorrect code. Please try again.');
+  }
+
+  user.loginOtpHash = undefined;
+  user.loginOtpExpire = undefined;
+  user.loginOtpAttempts = 0;
+  await user.save({ validateBeforeSave: false });
+
+  generateToken(res, user._id);
+  res.json({ success: true, user: sanitizeUser(user) });
+});
+
+// @desc    Resend the login OTP for a pending login
+// @route   POST /api/auth/login/resend-otp
+// @access  Public (guarded by the short-lived otpToken)
+const resendLoginOtp = asyncHandler(async (req, res) => {
+  const { otpToken } = req.body;
+
+  if (!otpToken) {
+    res.status(400);
+    throw new Error('Missing verification session');
+  }
+
+  let decoded;
+  try {
+    decoded = decodeLoginOtpToken(otpToken);
+  } catch {
+    res.status(400);
+    throw new Error('Your verification session has expired. Please log in again.');
+  }
+
+  const user = await User.findById(decoded.id).select('+loginOtpLastSentAt');
+  if (!user) {
+    res.status(401);
+    throw new Error('Account not found');
+  }
+
+  if (
+    user.loginOtpLastSentAt &&
+    Date.now() - user.loginOtpLastSentAt.getTime() < LOGIN_OTP_RESEND_COOLDOWN_MS
+  ) {
+    const waitSec = Math.ceil(
+      (LOGIN_OTP_RESEND_COOLDOWN_MS - (Date.now() - user.loginOtpLastSentAt.getTime())) / 1000
+    );
+    res.status(429);
+    throw new Error(`Please wait ${waitSec}s before requesting another code`);
+  }
+
+  try {
+    await issueLoginOtp(user);
+  } catch (err) {
+    console.error('Resend login OTP failed:', err.response?.body || err.message);
+    res.status(500);
+    throw new Error('Could not resend the code right now. Please try again shortly.');
+  }
+
+  res.json({
+    success: true,
+    otpToken: signLoginOtpToken(user._id), // rolling token so the wait doesn't expire the session
+    maskedEmail: maskEmail(user.email),
+  });
 });
 
 // @desc    Sign in or register using a Google ID token
@@ -171,7 +353,6 @@ const googleAuth = asyncHandler(async (req, res) => {
   let isNewSignup = false;
 
   if (user) {
-    // Existing account (registered with email/password) signing in with Google for the first time
     if (!user.googleId) {
       user.googleId = googleId;
       user.isVerified = true;
@@ -183,8 +364,6 @@ const googleAuth = asyncHandler(async (req, res) => {
       throw new Error('This account has been suspended. Contact support.');
     }
   } else {
-    // Brand-new sign-up via Google. Defaults to a buyer account since we don't yet know
-    // whether they want to sell — sellers can be upgraded later from their profile/settings.
     user = await Buyer.create({
       name,
       email,
@@ -195,6 +374,8 @@ const googleAuth = asyncHandler(async (req, res) => {
     isNewSignup = true;
   }
 
+  // Google sign-in bypasses the login-OTP gate intentionally — Google's own
+  // auth is already a strong second factor tied to the account's real owner.
   generateToken(res, user._id);
 
   res.json({ success: true, user: sanitizeUser(user) });
@@ -213,8 +394,6 @@ const forgotPassword = asyncHandler(async (req, res) => {
     throw new Error('Please provide your email address');
   }
 
-  // Always the same response, whether or not the account exists — this is what
-  // stops the endpoint being used to check which emails are registered.
   const genericResponse = {
     success: true,
     message: 'If an account exists for that email, we\u2019ve sent password reset instructions.',
@@ -240,7 +419,6 @@ const forgotPassword = asyncHandler(async (req, res) => {
       html: passwordResetEmailTemplate(user.name, resetUrl),
     });
   } catch (err) {
-    // Don't leave a dangling valid token if the email failed to send
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
     await user.save({ validateBeforeSave: false });
@@ -277,7 +455,7 @@ const resetPassword = asyncHandler(async (req, res) => {
     throw new Error('This reset link is invalid or has expired. Please request a new one.');
   }
 
-  user.password = password; // re-hashed by the pre('save') hook
+  user.password = password;
   user.resetPasswordToken = undefined;
   user.resetPasswordExpire = undefined;
   user.failedLoginAttempts = 0;
@@ -319,7 +497,6 @@ const updateMe = asyncHandler(async (req, res) => {
   res.json({ success: true, user: sanitizeUser(updated) });
 });
 
-// Strip sensitive fields before sending user back to client
 function sanitizeUser(user) {
   const obj = user.toObject ? user.toObject() : user;
   delete obj.password;
@@ -328,12 +505,18 @@ function sanitizeUser(user) {
   delete obj.resetPasswordExpire;
   delete obj.failedLoginAttempts;
   delete obj.lockUntil;
+  delete obj.loginOtpHash;
+  delete obj.loginOtpExpire;
+  delete obj.loginOtpAttempts;
+  delete obj.loginOtpLastSentAt;
   return obj;
 }
 
 module.exports = {
   registerUser,
   loginUser,
+  verifyLoginOtp,
+  resendLoginOtp,
   googleAuth,
   forgotPassword,
   resetPassword,
