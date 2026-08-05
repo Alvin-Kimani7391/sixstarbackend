@@ -35,53 +35,118 @@ const fmtDate = (d) =>
 
 /* ---------------------------------------------------------------- */
 /* Base shell — header / body / footer                               */
+/* Fluid, table-based layout (max-width, not fixed width) so it       */
+/* resizes correctly in every mail client's phone preview instead of  */
+/* forcing horizontal scroll or letting the client's own auto-shrink  */
+/* mangle the design. Media queries handle padding/font drop on       */
+/* narrow screens; a light dark-mode pass keeps text readable when    */
+/* the client auto-inverts colors (iOS Mail / Outlook mobile / Gmail  */
+/* app all do this to some emails automatically).                     */
 /* ---------------------------------------------------------------- */
 function baseLayout({ preheader = '', eyebrow = '', title = '', intro = '', bodyHtml = '', footerNote = '' }) {
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark">
 <title>${title}</title>
+<!--[if mso]>
+<noscript>
+  <xml>
+    <o:OfficeDocumentSettings>
+      <o:PixelsPerInch>96</o:PixelsPerInch>
+    </o:OfficeDocumentSettings>
+  </xml>
+</noscript>
+<style>
+  table { border-collapse: collapse; }
+  td, th, div, p, a, h1, h2, h3 { font-family: Arial, sans-serif; }
+</style>
+<![endif]-->
+<style>
+  html, body { margin:0 !important; padding:0 !important; height:100% !important; width:100% !important; }
+  * { -ms-text-size-adjust:100%; -webkit-text-size-adjust:100%; }
+  table, td { mso-table-lspace:0pt; mso-table-rspace:0pt; }
+  img { -ms-interpolation-mode:bicubic; border:0; height:auto; line-height:100%; outline:none; text-decoration:none; }
+  a[x-apple-data-detectors] { color:inherit !important; text-decoration:none !important; font-size:inherit !important; font-family:inherit !important; font-weight:inherit !important; line-height:inherit !important; }
+  #MessageViewBody a { color:inherit; text-decoration:none; }
+
+  @media only screen and (max-width: 600px) {
+    .ss-wrapper-pad { padding-left:14px !important; padding-right:14px !important; }
+    .ss-card { border-radius:12px !important; }
+    .ss-header-pad { padding:26px 22px !important; }
+    .ss-body-pad { padding:26px 22px !important; }
+    .ss-footer-pad { padding:18px 22px !important; }
+    .ss-title { font-size:19px !important; }
+    .ss-otp-box { width:15% !important; padding:0 3px !important; }
+    .ss-otp-digit { width:100% !important; height:44px !important; font-size:18px !important; }
+    .ss-stack { display:block !important; width:100% !important; }
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .ss-bg { background:#15130f !important; }
+    .ss-card { background:#221f19 !important; }
+    .ss-ink { color:#f3ede1 !important; }
+    .ss-muted { color:#b8ac98 !important; }
+    .ss-footer { background:#1b1912 !important; border-top-color:#3a352a !important; }
+    .ss-chip { background:#332c1d !important; }
+    .ss-border { border-color:#3a352a !important; }
+  }
+</style>
 </head>
-<body style="margin:0;padding:0;background:${COLORS.bg};font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;">
-  <span style="display:none;font-size:1px;color:${COLORS.bg};line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;">${preheader}</span>
+<body class="ss-bg" style="margin:0;padding:0;background:${COLORS.bg};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+    ${preheader}${'&#8199;'.repeat(60)}
+  </div>
 
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${COLORS.bg};padding:32px 12px;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="ss-bg" style="background:${COLORS.bg};">
     <tr>
-      <td align="center">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:${COLORS.card};border-radius:16px;overflow:hidden;box-shadow:0 10px 40px rgba(15,23,42,0.10);">
-
-          <!-- HEADER -->
+      <td align="center" class="ss-wrapper-pad" style="padding:32px 12px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;">
           <tr>
-            <td style="background:linear-gradient(135deg,${COLORS.headerFrom},${COLORS.headerTo});padding:32px 36px;text-align:center;">
-              <div style="font-size:12px;letter-spacing:2px;color:rgba(255,255,255,0.65);text-transform:uppercase;font-weight:600;margin-bottom:8px;">
-                ${eyebrow || BRAND_NAME}
-              </div>
-              <div style="font-size:22px;font-weight:700;color:#ffffff;letter-spacing:0.2px;">
-                ${title}
-              </div>
+            <td class="ss-card" style="background:${COLORS.card};border-radius:16px;overflow:hidden;box-shadow:0 10px 40px rgba(15,23,42,0.10);">
+
+              <!-- HEADER -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td class="ss-header-pad" style="background:${COLORS.headerFrom};background-image:linear-gradient(135deg,${COLORS.headerFrom},${COLORS.headerTo});padding:32px 36px;text-align:center;">
+                    <div style="font-size:12px;letter-spacing:2px;color:rgba(255,255,255,0.65);text-transform:uppercase;font-weight:600;margin-bottom:8px;">
+                      ${eyebrow || BRAND_NAME}
+                    </div>
+                    <div class="ss-title" style="font-size:22px;font-weight:700;color:#ffffff;letter-spacing:0.2px;">
+                      ${title}
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- BODY -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td class="ss-body-pad" style="padding:36px;">
+                    ${intro ? `<p class="ss-ink" style="margin:0 0 20px;font-size:15px;line-height:1.6;color:${COLORS.ink};">${intro}</p>` : ''}
+                    ${bodyHtml}
+                  </td>
+                </tr>
+              </table>
+
+              <!-- FOOTER -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td class="ss-footer ss-footer-pad ss-border" style="background:#f8fafc;padding:22px 36px;text-align:center;border-top:1px solid ${COLORS.border};">
+                    ${footerNote ? `<p class="ss-muted" style="margin:0 0 8px;font-size:12px;color:${COLORS.muted};">${footerNote}</p>` : ''}
+                    <p class="ss-muted" style="margin:0;font-size:12px;color:${COLORS.muted};">
+                      © ${new Date().getFullYear()} ${BRAND_NAME}. All rights reserved.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
             </td>
           </tr>
-
-          <!-- BODY -->
-          <tr>
-            <td style="padding:36px;">
-              ${intro ? `<p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:${COLORS.ink};">${intro}</p>` : ''}
-              ${bodyHtml}
-            </td>
-          </tr>
-
-          <!-- FOOTER -->
-          <tr>
-            <td style="background:#f8fafc;padding:22px 36px;text-align:center;border-top:1px solid ${COLORS.border};">
-              ${footerNote ? `<p style="margin:0 0 8px;font-size:12px;color:${COLORS.muted};">${footerNote}</p>` : ''}
-              <p style="margin:0;font-size:12px;color:${COLORS.muted};">
-                © ${new Date().getFullYear()} ${BRAND_NAME}. All rights reserved.
-              </p>
-            </td>
-          </tr>
-
         </table>
       </td>
     </tr>
@@ -220,26 +285,44 @@ function passwordResetEmailTemplate(name, resetUrl) {
 
 function emailOtpTemplate({ name, code }) {
   const digits = String(code).split('');
+
+  // Fixed-width px cells break on narrow phone previews (they either force
+  // horizontal scroll or get squeezed illegibly by the client's own
+  // auto-shrink). Using a full-width (100%) table with each <td> at an equal
+  // percentage keeps the six boxes evenly sized and readable at any screen
+  // width, and the .ss-otp-box / .ss-otp-digit media-query rules in
+  // baseLayout shrink them further on screens under 600px.
+  const cellPct = (100 / digits.length).toFixed(4);
   const digitBoxes = digits
     .map(
-      (d) => `<td style="padding:0 4px;">
-        <div style="width:40px;height:48px;border-radius:8px;background:${COLORS.chip};border:1px solid ${COLORS.border};
-          display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:800;color:${COLORS.ink};font-family:monospace;">
+      (d) => `<td class="ss-otp-box" width="${cellPct}%" style="padding:0 3px;width:${cellPct}%;">
+        <div class="ss-otp-digit ss-chip ss-border" style="width:100%;height:52px;line-height:52px;border-radius:8px;background:${COLORS.chip};border:1px solid ${COLORS.border};
+          text-align:center;font-size:24px;font-weight:800;color:${COLORS.ink};font-family:'Courier New',Courier,monospace;">
           ${d}
         </div>
       </td>`
     )
     .join('');
 
+  const plainCode = digits.join(' ');
+
   const bodyHtml = `
-    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:12px auto 20px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:4px 0 22px;table-layout:fixed;">
       <tr>${digitBoxes}</tr>
     </table>
-    <p style="text-align:center;margin:0 0 4px;font-size:13px;color:${COLORS.muted};">
-      This code expires in <strong>10 minutes</strong>.
+
+    <!--[if mso]>
+    <p style="text-align:center;margin:0 0 18px;font-size:20px;font-weight:800;letter-spacing:6px;color:${COLORS.ink};font-family:'Courier New',Courier,monospace;">${code}</p>
+    <![endif]-->
+
+    <p class="ss-muted" style="text-align:center;margin:0 0 4px;font-size:13px;color:${COLORS.muted};">
+      Boxes not showing right? Your code is: <strong class="ss-ink" style="color:${COLORS.ink};letter-spacing:1px;">${plainCode}</strong>
     </p>
-    <p style="margin:20px 0 0;font-size:13px;color:${COLORS.muted};line-height:1.6;">
-      If you didn't request this, you can safely ignore this email.
+    <p class="ss-muted" style="text-align:center;margin:8px 0 0;font-size:13px;color:${COLORS.muted};">
+      This code expires in <strong class="ss-ink" style="color:${COLORS.ink};">10 minutes</strong>.
+    </p>
+    <p class="ss-muted" style="margin:22px 0 0;font-size:13px;color:${COLORS.muted};line-height:1.6;">
+      If you didn't request this, you can safely ignore this email — no changes will be made to your account.
     </p>
   `;
 
