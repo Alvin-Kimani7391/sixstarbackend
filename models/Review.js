@@ -38,8 +38,12 @@ reviewSchema.statics.recalculateProductRating = async function (productId) {
   }
 };
 
-reviewSchema.post('save', function () {
-  this.constructor.recalculateProductRating(this.product);
+// IMPORTANT: must be async + awaited, otherwise Mongoose doesn't wait for the
+// recalculation to finish before create()/save() resolves in the controller —
+// the API response (and any immediate re-fetch from the client) can race
+// ahead of the updated ratingsAverage/ratingsCount actually being persisted.
+reviewSchema.post('save', async function () {
+  await this.constructor.recalculateProductRating(this.product);
 });
 
 // Also recalc after updates/deletes done via findOneAndX

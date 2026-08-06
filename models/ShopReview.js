@@ -38,8 +38,11 @@ shopReviewSchema.statics.recalculateShopRating = async function (shopId) {
   }
 };
 
-shopReviewSchema.post('save', function () {
-  this.constructor.recalculateShopRating(this.shop);
+// Same fix as Review model: must be async + awaited so the shop's
+// ratingsAverage/ratingsCount are actually committed before the controller
+// responds and before the client's immediate re-fetch of the shop.
+shopReviewSchema.post('save', async function () {
+  await this.constructor.recalculateShopRating(this.shop);
 });
 
 // Also recalc after updates/deletes done via findOneAndX
