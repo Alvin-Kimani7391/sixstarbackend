@@ -9,20 +9,45 @@ const RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute between sends
 const MAX_ATTEMPTS = 5;
 
 function generateOtp() {
-  // 6-digit, zero-padded
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
 
-// @desc  Send (or resend) a 6-digit verification code to the logged-in seller's email
-// @route POST /api/seller-verification/email/send-code
-// @access Private (retailer/wholesaler)
-const sendEmailOtp = asyncHandler(async (req, res) => {
-  if (!['retailer', 'wholesaler'].includes(req.user.role)) {
-    res.status(403);
-    throw new Error('Only sellers need to verify their email for onboarding');
-  }
+// ---------------------------------------------------------------
+// Reusable core — generates + emails a fresh code and persists the
+// hash on the given user doc. Exported so authController can call it
+// straight after registration, not just from the /send-code route.
+// Works on any user doc, whether it was just created in memory
+// (Model.create(...)) or loaded fresh from the DB.
+// ---------------------------------------------------------------
+async function issueEmailOtp(user) {
+  const code = generateOtp();
+  user.emailOtpHash = crypto.createHash('sha256').update(code).digest('hex');
+  user.emailOtpExpire = new Date(Date.now() + OTP_TTL_MS);
+  user.emailOtpAttempts = 0;
+  user.emailOtpLastSentAt = new Date();
+  await user.save({ validateBeforeSave: false });
 
+  await sendEmail({
+    to: user.email,
+    subject: 'Verify your email — Six Star Suppliers',
+    html: emailOtpTemplate({ name: user.name, code }),
+  });
+}
+
+// @desc  Send (or resend) a 6-digit verification code to the logged-in
+//        user's email. Works for buyers, retailers, and wholesalers —
+//        anyone whose account isn't verified yet.
+// @route POST /api/auth/email/send-code
+//        (also mounted at /api/seller-verification/email/send-code for
+//        backward compatibility with the seller onboarding wizard)
+// @access Private (any authenticated role)
+const sendEmailOtp = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.id).select('+emailOtpLastSentAt');
+
+  if (!user) {
+    res.status(404);
+    throw new Error('Account not found');
+  }
 
   if (user.isVerified) {
     res.json({ success: true, alreadyVerified: true, email: user.email });
@@ -35,19 +60,8 @@ const sendEmailOtp = asyncHandler(async (req, res) => {
     throw new Error(`Please wait ${waitSec}s before requesting another code`);
   }
 
-  const code = generateOtp();
-  user.emailOtpHash = crypto.createHash('sha256').update(code).digest('hex');
-  user.emailOtpExpire = new Date(Date.now() + OTP_TTL_MS);
-  user.emailOtpAttempts = 0;
-  user.emailOtpLastSentAt = new Date();
-  await user.save({ validateBeforeSave: false });
-
   try {
-    await sendEmail({
-      to: user.email,
-      subject: 'Verify your email — Six Star Suppliers',
-      html: emailOtpTemplate({ name: user.name, code }),
-    });
+    await issueEmailOtp(user);
   } catch (err) {
     console.error('OTP email failed:', err.response?.body || err.message);
     res.status(500);
@@ -57,9 +71,10 @@ const sendEmailOtp = asyncHandler(async (req, res) => {
   res.json({ success: true, email: user.email, expiresInSeconds: OTP_TTL_MS / 1000 });
 });
 
-// @desc  Verify the 6-digit code
-// @route POST /api/seller-verification/email/verify-code
-// @access Private (retailer/wholesaler)
+// @desc  Verify the 6-digit code and flip isVerified to true
+// @route POST /api/auth/email/verify-code
+//        (also mounted at /api/seller-verification/email/verify-code)
+// @access Private (any authenticated role)
 const verifyEmailOtp = asyncHandler(async (req, res) => {
   const { code } = req.body;
   if (!code) {
@@ -70,6 +85,11 @@ const verifyEmailOtp = asyncHandler(async (req, res) => {
   const user = await User.findById(req.user.id).select(
     '+emailOtpHash +emailOtpExpire +emailOtpAttempts'
   );
+
+  if (!user) {
+    res.status(404);
+    throw new Error('Account not found');
+  }
 
   if (user.isVerified) {
     res.json({ success: true, verified: true, email: user.email });
@@ -103,4 +123,4 @@ const verifyEmailOtp = asyncHandler(async (req, res) => {
   res.json({ success: true, verified: true, email: user.email });
 });
 
-module.exports = { sendEmailOtp, verifyEmailOtp };
+module.exports = { sendEmailOtp, verifyEmailOtp, issueEmailOtp };

@@ -6,6 +6,7 @@ const { User, Wholesaler, Retailer, Buyer, Admin } = require('../models/User');
 const SellerVerification = require('../models/SellerVerification');
 const generateToken = require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
+const { issueEmailOtp } = require('./emailVerificationController');
 const {
   passwordResetEmailTemplate,
   welcomeEmailTemplate,
@@ -19,7 +20,7 @@ const MAX_LOGIN_ATTEMPTS = 5;
 const LOCK_TIME_MS = 15 * 60 * 1000; // 15 minutes
 const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
-// ---------- Login OTP config (approved sellers only) ----------
+// ---------- Login OTP config (approved sellers only — 2FA, separate from email verification) ----------
 const LOGIN_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const LOGIN_OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 1 minute
 const LOGIN_OTP_MAX_ATTEMPTS = 5;
@@ -28,9 +29,6 @@ function generateOtp() {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
 
-// Short-lived, purpose-scoped JWT that identifies which pending login this
-// OTP belongs to. It is NOT a session token — it can only be exchanged for
-// one via /auth/login/verify-otp, and it never touches a cookie.
 function signLoginOtpToken(userId) {
   return jwt.sign({ id: userId, purpose: 'login_otp' }, process.env.JWT_SECRET, { expiresIn: '10m' });
 }
@@ -63,7 +61,6 @@ async function issueLoginOtp(user) {
   });
 }
 
-// Fire-and-forget helper — a failed welcome email should never break signup.
 function sendWelcomeEmail(user) {
   sendEmail({
     to: user.email,
@@ -110,6 +107,9 @@ const registerUser = asyncHandler(async (req, res) => {
   const Model = roleModelMap[role];
   const user = await Model.create({ name, email, phone, password, ...rest });
 
+  // Session cookie so the frontend can immediately call the protected
+  // /auth/email/verify-code endpoint on the next page (verify-email.html)
+  // without asking the person to log in again.
   generateToken(res, user._id);
 
   res.status(201).json({
@@ -118,10 +118,20 @@ const registerUser = asyncHandler(async (req, res) => {
   });
 
   sendWelcomeEmail(user);
+
+  // Every local registration (buyer, retailer, wholesaler) starts out
+  // unverified — fire the first OTP code immediately so the person lands
+  // straight on the code-entry screen instead of having to ask for one.
+  issueEmailOtp(user).catch((err) =>
+    console.error('Registration OTP email failed:', err.response?.body || err.message)
+  );
 });
 
-// @desc    Login any user type — sellers whose verification is APPROVED
-//          are stopped for a login OTP before a session is issued.
+// @desc    Login any user type.
+//          Unverified accounts (any role) are stopped for email OTP
+//          verification before they can use the app.
+//          Sellers whose verification is separately APPROVED are then
+//          also stopped for a login 2FA OTP.
 // @route   POST /api/auth/login
 // @access  Public
 const loginUser = asyncHandler(async (req, res) => {
@@ -176,7 +186,27 @@ const loginUser = asyncHandler(async (req, res) => {
   user.lockUntil = undefined;
   await user.save({ validateBeforeSave: false });
 
-  // ---------- Login-OTP gate: only for sellers with an APPROVED verification ----------
+  // ---------- Email verification gate — applies to EVERY role ----------
+  // Covers brand-new signups who haven't finished the OTP screen yet, AND
+  // pre-existing accounts (created before this feature shipped) that were
+  // never verified. Either way, they don't get past login unverified.
+  if (!user.isVerified) {
+    // Issue the session cookie anyway so the frontend can call the
+    // protected /auth/email/* endpoints on the verify-email screen without
+    // a second login. They still can't do anything else meaningful until
+    // isVerified flips to true — every buyer/seller page you gate on the
+    // frontend should check this flag.
+    generateToken(res, user._id);
+
+    return res.json({
+      success: true,
+      emailVerificationRequired: true,
+      email: user.email,
+      user: sanitizeUser(user),
+    });
+  }
+
+  // ---------- Login-OTP gate (2FA): only for sellers with an APPROVED verification ----------
   const isSellerRole = ['wholesaler', 'retailer'].includes(user.role);
   let requiresLoginOtp = false;
 
@@ -314,7 +344,7 @@ const resendLoginOtp = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    otpToken: signLoginOtpToken(user._id), // rolling token so the wait doesn't expire the session
+    otpToken: signLoginOtpToken(user._id),
     maskedEmail: maskEmail(user.email),
   });
 });
@@ -374,8 +404,8 @@ const googleAuth = asyncHandler(async (req, res) => {
     isNewSignup = true;
   }
 
-  // Google sign-in bypasses the login-OTP gate intentionally — Google's own
-  // auth is already a strong second factor tied to the account's real owner.
+  // Google sign-in bypasses the email-OTP gate intentionally — Google's own
+  // verified-email claim already proves ownership of the address.
   generateToken(res, user._id);
 
   res.json({ success: true, user: sanitizeUser(user) });
@@ -509,6 +539,10 @@ function sanitizeUser(user) {
   delete obj.loginOtpExpire;
   delete obj.loginOtpAttempts;
   delete obj.loginOtpLastSentAt;
+  delete obj.emailOtpHash;
+  delete obj.emailOtpExpire;
+  delete obj.emailOtpAttempts;
+  delete obj.emailOtpLastSentAt;
   return obj;
 }
 
