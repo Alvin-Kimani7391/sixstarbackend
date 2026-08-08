@@ -40,6 +40,27 @@ async function notifyAdminsProductPending(product, sellerName) {
 }
 
 // ---------------------------------------------------------------------------
+// Recursively collects a category's own ID plus every descendant category ID
+// underneath it (children, grandchildren, ...). Needed because products are
+// ALWAYS assigned to a LEAF category only (see the isLeafCategory() checks in
+// createProduct/updateProduct below) — so filtering the public storefront by
+// an exact match on a parent or mid-level category id would return nothing.
+// This widens a category filter to "this category, or any category nested
+// under it, at any depth," so clicking a top-level or mid-level category
+// (from the mega-menu, drawer accordion, or the product.html cascade filter)
+// shows every product underneath it immediately, with no narrowing required.
+// ---------------------------------------------------------------------------
+async function getCategoryAndDescendantIds(categoryId) {
+  const ids = [categoryId];
+  const children = await Category.find({ parentCategory: categoryId }).select('_id');
+  for (const child of children) {
+    const childIds = await getCategoryAndDescendantIds(child._id);
+    ids.push(...childIds);
+  }
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
 // Shared validation: given a leaf category plus whatever attributes/variants
 // the seller sent, checks them against that category's attribute rules and
 // returns the shapes ready to save. Throws an Error with `.status` on failure.
@@ -636,7 +657,17 @@ const getProducts = asyncHandler(async (req, res) => {
 
   const filter = { status: 'active', isActive: true, finalPrice: { $ne: null } };
 
-  if (category) filter.category = category;
+  // Widen a category filter to include every descendant category too — see
+  // getCategoryAndDescendantIds() above for why (products only ever live on
+  // LEAF categories, so an exact match on a parent/mid-level id would
+  // otherwise return nothing). A leaf category id just resolves to a
+  // single-element array, so this is a no-op change in behaviour for leaf
+  // selections and only widens things for parent/mid-level selections.
+  if (category) {
+    const categoryIds = await getCategoryAndDescendantIds(category);
+    filter.category = { $in: categoryIds };
+  }
+
   if (hotDeals === 'true') filter.isHotDeal = true;
   if (sellerRole === 'wholesaler' || sellerRole === 'retailer') filter.sellerRole = sellerRole;
   if (shop) filter.shop = shop;
