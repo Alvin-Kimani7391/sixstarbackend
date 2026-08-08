@@ -60,6 +60,13 @@ async function getCategoryAndDescendantIds(categoryId) {
   return ids;
 }
 
+// Escapes regex special characters in free-text user input before it's
+// dropped into a RegExp — otherwise a search like "iPhone (2023)" would throw
+// or behave unexpectedly.
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // ---------------------------------------------------------------------------
 // Shared validation: given a leaf category plus whatever attributes/variants
 // the seller sent, checks them against that category's attribute rules and
@@ -678,7 +685,44 @@ const getProducts = asyncHandler(async (req, res) => {
     filter.deliveryType = 'heavy';
     filter.freeDelivery = true;
   }
-  if (search) filter.$text = { $search: search };
+
+  // ---------------------------------------------------------------------
+  // SEARCH — matches product name/description, the product's Brand/other
+  // attribute values (e.g. "Nike"), AND the category name it belongs to
+  // (e.g. typing "Electronics" or "Smartphones" surfaces every product
+  // under that category, same as clicking it). Case-insensitive, partial
+  // match on all three.
+  //
+  // Deliberately NOT using MongoDB's $text here: $text queries cannot be
+  // nested inside an $or clause alongside other conditions, which is
+  // exactly what's needed to search name + category + attributes together
+  // in one query. A plain case-insensitive regex search across a modest
+  // product catalog is simpler, combinable, and fast enough.
+  // ---------------------------------------------------------------------
+  if (search && search.trim()) {
+    const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
+
+    const searchOr = [
+      { name: searchRegex },
+      { description: searchRegex },
+      { 'attributes.value': searchRegex },
+    ];
+
+    // Category-name match: find every category whose name matches, then widen
+    // each to its full descendant set (same logic as the category filter above),
+    // so e.g. searching "Electronics" also returns everything nested under it.
+    const matchingCategories = await Category.find({ name: searchRegex, isActive: true }).select('_id');
+    if (matchingCategories.length) {
+      const nestedIdLists = await Promise.all(
+        matchingCategories.map((c) => getCategoryAndDescendantIds(c._id))
+      );
+      const categoryIdsFromSearch = nestedIdLists.flat();
+      searchOr.push({ category: { $in: categoryIdsFromSearch } });
+    }
+
+    filter.$or = searchOr;
+  }
+
   if (minPrice || maxPrice) {
     filter.finalPrice = { ...filter.finalPrice };
     if (minPrice) filter.finalPrice.$gte = Number(minPrice);
