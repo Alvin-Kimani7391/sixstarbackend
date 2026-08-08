@@ -11,6 +11,7 @@ const {
   getMyFlashSales,
   cancelMyFlashSale,
   getActiveFlashSales,
+  getTodayFlashSales, // <-- new
 } = require('../controllers/flashSaleController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
@@ -18,7 +19,7 @@ const { protect, authorize } = require('../middleware/authMiddleware');
 // Powers a "Flash Sale" rail/page on the buyer-facing site — everything
 // currently inside its 2:00 PM-midnight window with stock left.
 router.get('/active', getActiveFlashSales);
-
+router.get('/today', getTodayFlashSales); // <-- new, keep both — /active still useful elsewhere
 // ---------- Seller-only ----------
 // NOTE: '/my' is declared before any '/:id' style route so Express doesn't
 // try to treat "my" as an id (same rule already used in productRoutes.js).

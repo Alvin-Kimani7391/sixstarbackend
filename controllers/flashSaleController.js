@@ -333,6 +333,39 @@ const rejectFlashSale = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Flash Sale rejected', flashSale });
 });
 
+
+// @desc    Everything scheduled for TODAY's Flash Sale window — both live
+//          items (buyable now) and upcoming ones still waiting for 2:00 PM
+//          (shown locked on the storefront so shoppers can preview them).
+// @route   GET /api/flash-sales/today
+// @access  Public
+const getTodayFlashSales = asyncHandler(async (req, res) => {
+  const now = new Date();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(now);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const sales = await FlashSale.find({
+    status: { $in: ['scheduled', 'active'] },
+    saleDate: { $gte: startOfDay, $lte: endOfDay },
+  })
+    .populate('product', 'name images category finalPrice sellerPrice stock')
+    .sort('startAt');
+
+  const result = sales
+    // drop anything already fully sold out even though status hasn't ticked yet
+    .filter((s) => s.stockAllocated - s.stockSold > 0)
+    .map((s) => {
+      const obj = s.toObject();
+      obj.isLive = s.startAt <= now && s.endAt >= now;
+      return obj;
+    });
+
+  res.json({ success: true, count: result.length, flashSales: result });
+});
+
+
 module.exports = {
   submitFlashSale,
   getMyFlashSales,
@@ -343,4 +376,5 @@ module.exports = {
   getAllFlashSalesAdmin,
   approveFlashSale,
   rejectFlashSale,
+  getTodayFlashSales,
 };
