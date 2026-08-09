@@ -26,6 +26,15 @@ const orderItemSchema = new Schema(
     // drifts even if the seller later edits their product's sellerPrice.
     sellerPriceAtPurchase: { type: Number, required: true },
 
+// --- Flash Sale attribution ---
+    // When this line was bought during an active Flash Sale, isFlashDeal is
+    // true and flashSale points at the specific FlashSale document whose
+    // price/stock pool the purchase drew from. priceAtPurchase above is
+    // already the flashSalePrice in that case — this is just for
+    // traceability (seller dashboards, "Flash Sale performance" reports).
+    isFlashDeal: { type: Boolean, default: false },
+    flashSale: { type: Schema.Types.ObjectId, ref: 'FlashSale', default: null },
+
     // This line's contribution to delivery cost (wholesale only — 0 for retailer
     // lines, which are covered by the order-level transportFee instead).
     deliveryFee: { type: Number, default: 0 },

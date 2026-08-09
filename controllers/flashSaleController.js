@@ -203,6 +203,67 @@ const getActiveFlashSales = asyncHandler(async (req, res) => {
   res.json({ success: true, count: live.length, flashSales: live });
 });
 
+
+// @desc    Everything scheduled for TODAY's Flash Sale window — both live
+//          items (buyable now) and upcoming ones still waiting for 2:00 PM
+//          (shown locked on the storefront so shoppers can preview them).
+// @route   GET /api/flash-sales/today
+// @access  Public
+const getTodayFlashSales = asyncHandler(async (req, res) => {
+  const now = new Date();
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(now);
+  endOfDay.setHours(23, 59, 59, 999);
+
+  const sales = await FlashSale.find({
+    status: { $in: ['scheduled', 'active'] },
+    saleDate: { $gte: startOfDay, $lte: endOfDay },
+  })
+    .populate('product', 'name images category finalPrice sellerPrice stock')
+    .sort('startAt');
+
+  const result = sales
+    // drop anything already fully sold out even though status hasn't ticked yet
+    .filter((s) => s.stockAllocated - s.stockSold > 0)
+    .map((s) => {
+      const obj = s.toObject();
+      obj.isLive = s.startAt <= now && s.endAt >= now;
+      return obj;
+    });
+
+  res.json({ success: true, count: result.length, flashSales: result });
+});
+
+
+
+
+// @desc    Single Flash Sale by id — used by the frontend cart/checkout to
+//          re-validate live price/stock for a line before charging it,
+//          the same way products are re-fetched fresh on every page load.
+// @route   GET /api/flash-sales/:id
+// @access  Public
+const getFlashSaleById = asyncHandler(async (req, res) => {
+  const flashSale = await FlashSale.findById(req.params.id).populate(
+    'product',
+    'name images category finalPrice sellerPrice stock sellerRole'
+  );
+  if (!flashSale) {
+    res.status(404);
+    throw new Error('Flash Sale not found');
+  }
+
+  const now = new Date();
+  const obj = flashSale.toObject();
+  obj.isLive =
+    ['scheduled', 'active'].includes(flashSale.status) &&
+    flashSale.startAt <= now &&
+    flashSale.endAt >= now &&
+    flashSale.stockAllocated - flashSale.stockSold > 0;
+
+  res.json({ success: true, flashSale: obj });
+});
+
 // ---------------------------------------------------------------------------
 // See the integration note at the top of this file — call from wherever an
 // order is finalized for a product currently in an active Flash Sale.
@@ -334,36 +395,6 @@ const rejectFlashSale = asyncHandler(async (req, res) => {
 });
 
 
-// @desc    Everything scheduled for TODAY's Flash Sale window — both live
-//          items (buyable now) and upcoming ones still waiting for 2:00 PM
-//          (shown locked on the storefront so shoppers can preview them).
-// @route   GET /api/flash-sales/today
-// @access  Public
-const getTodayFlashSales = asyncHandler(async (req, res) => {
-  const now = new Date();
-  const startOfDay = new Date(now);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(now);
-  endOfDay.setHours(23, 59, 59, 999);
-
-  const sales = await FlashSale.find({
-    status: { $in: ['scheduled', 'active'] },
-    saleDate: { $gte: startOfDay, $lte: endOfDay },
-  })
-    .populate('product', 'name images category finalPrice sellerPrice stock')
-    .sort('startAt');
-
-  const result = sales
-    // drop anything already fully sold out even though status hasn't ticked yet
-    .filter((s) => s.stockAllocated - s.stockSold > 0)
-    .map((s) => {
-      const obj = s.toObject();
-      obj.isLive = s.startAt <= now && s.endAt >= now;
-      return obj;
-    });
-
-  res.json({ success: true, count: result.length, flashSales: result });
-});
 
 
 module.exports = {
@@ -377,4 +408,5 @@ module.exports = {
   approveFlashSale,
   rejectFlashSale,
   getTodayFlashSales,
+  getFlashSaleById, // <-- new
 };

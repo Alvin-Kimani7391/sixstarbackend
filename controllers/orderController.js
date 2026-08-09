@@ -3,6 +3,7 @@ const Order = require('../models/Order');
 const Product = require('../models/Product');
 const ProductVariant = require('../models/ProductVariant');
 const Agent = require('../models/Agent');
+const FlashSale = require('../models/FlashSale');
 const { User } = require('../models/User');
 const sendEmail = require('../utils/sendEmail');
 const {
@@ -72,6 +73,9 @@ function safeSendEmail(opts, label) {
 // @desc    Buyer places an order and pastes their M-Pesa confirmation message
 // @route   POST /api/orders
 // @access  Private (buyer)
+// @desc    Buyer places an order and pastes their M-Pesa confirmation message
+// @route   POST /api/orders
+// @access  Private (buyer)
 const createOrder = asyncHandler(async (req, res) => {
   const { items, shippingAddress, mpesaMessage, agentCode, transportFee } = req.body;
 
@@ -85,13 +89,12 @@ const createOrder = asyncHandler(async (req, res) => {
   }
 
   // ---------------- PASS 1: validate everything, mutate nothing ----------------
-  // If item #4 fails validation we don't want items #1-3's stock already decremented.
   let itemsTotal = 0;
   let wholesaleDeliveryTotal = 0;
-  let hasRetailItem = false; // true if ANY item rides the regional transportFee (retail, or wholesale 'simple')
+  let hasRetailItem = false;
   let hasNegotiatedItem = false;
   const deliveryNotes = [];
-  const prepared = []; // { product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee }
+  const prepared = []; // { product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee, flashSale? }
 
   for (const reqItem of items) {
     const product = await Product.findOne({ _id: reqItem.productId, status: 'active', isActive: true });
@@ -102,19 +105,65 @@ const createOrder = asyncHandler(async (req, res) => {
 
     const quantity = Math.max(1, Number(reqItem.quantity) || 1);
 
+    // ============================================================
+    // FLASH SALE LINE — its price and stock pool come from the FlashSale
+    // document, not the product's regular sellerPrice/pricingTiers/stock.
+    // Everything is re-derived server-side here — the client only ever
+    // supplies which flashSaleId it wants, never a price.
+    // ============================================================
+    if (reqItem.flashSaleId) {
+      const flashSale = await FlashSale.findById(reqItem.flashSaleId);
+      if (!flashSale || flashSale.product.toString() !== product._id.toString()) {
+        res.status(400);
+        throw new Error(`Flash Sale for "${product.name}" is no longer available`);
+      }
+
+      const now = new Date();
+      const isLive =
+        ['scheduled', 'active'].includes(flashSale.status) &&
+        flashSale.startAt <= now &&
+        flashSale.endAt >= now;
+      if (!isLive) {
+        res.status(400);
+        throw new Error(`The Flash Sale for "${product.name}" has ended or hasn't started yet`);
+      }
+
+      const remaining = flashSale.stockAllocated - flashSale.stockSold;
+      if (remaining < quantity) {
+        res.status(400);
+        throw new Error(
+          `Only ${remaining} unit(s) left in the "${product.name}" Flash Sale — please reduce the quantity`
+        );
+      }
+
+      // Flash Sale items are treated as standard (retail-style) delivery,
+      // regardless of the underlying seller's usual wholesale terms — the
+      // Flash Sale model doesn't carry its own delivery-charge config.
+      hasRetailItem = true;
+
+      const unitPrice = flashSale.flashSalePrice;
+      itemsTotal += unitPrice * quantity;
+
+      prepared.push({
+        product,
+        variantDoc: null,
+        quantity,
+        unitPrice,
+        sellerUnitPrice: unitPrice, // no separate admin markup modeled for Flash Sale pricing
+        deliveryFee: 0,
+        flashSale,
+      });
+
+      continue; // skip all the regular-product pricing/variant/stock logic below
+    }
+
     // --- Wholesale MOQ, enforced here regardless of what the client sent ---
-    // (MOQ applies to every wholesale product, 'simple' or 'heavy' delivery alike.)
     if (product.sellerRole === 'wholesaler') {
       const moq = product.minOrderQuantity || 1;
       if (quantity < moq) {
         res.status(400);
         throw new Error(`"${product.name}" requires a minimum order of ${moq} units`);
       }
-      // FIX: a 'simple' wholesale product ships exactly like a retail item — it
-      // must count towards hasRetailItem so the regional transportFee actually
-      // gets applied to it. Previously only sellerRole was checked here, so
-      // 'simple' wholesale items got neither a wholesale delivery fee NOR the
-      // regional transport fee — i.e. free delivery by accident.
       if (product.deliveryType === 'simple') {
         hasRetailItem = true;
       }
@@ -159,7 +208,6 @@ const createOrder = asyncHandler(async (req, res) => {
       throw new Error(`Insufficient stock for ${product.name}`);
     }
 
-    // --- Buyer-facing price: server-computed and tier-aware, never trust a client-submitted price ---
     const basePrice = product.displayPrice;
     if (basePrice == null) {
       res.status(400);
@@ -168,12 +216,8 @@ const createOrder = asyncHandler(async (req, res) => {
     const unitPrice = resolveUnitPrice(basePrice, product.pricingTiers, quantity) + (variantDoc?.priceAdjustment || 0);
     itemsTotal += unitPrice * quantity;
 
-    // --- Seller's own price snapshot (what the seller sees in their dashboard),
-    // independent of admin markup/discount. Locked in at purchase time so it
-    // never drifts if the seller later edits the product. ---
     const sellerUnitPrice = (product.sellerPrice || 0) + (variantDoc?.priceAdjustment || 0);
 
-    // --- Wholesale delivery, computed from the seller's own terms on the product ---
     const { fee, note } = computeWholesaleDeliveryForItem(product, quantity);
     wholesaleDeliveryTotal += fee;
     if (note) deliveryNotes.push(`${product.name}: ${note}`);
@@ -181,9 +225,6 @@ const createOrder = asyncHandler(async (req, res) => {
     prepared.push({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee: fee });
   }
 
-  // --- If any item needs delivery negotiated directly with the seller, the buyer
-  // MUST have supplied a real address/landmark — otherwise the seller has nothing
-  // to negotiate against. Mirrors the frontend check but is authoritative here. ---
   if (hasNegotiatedItem) {
     const addressDetail = (shippingAddress?.notes || shippingAddress?.address || '').trim();
     if (addressDetail.length < 8) {
@@ -195,37 +236,54 @@ const createOrder = asyncHandler(async (req, res) => {
   }
 
   // ---------------- PASS 2: everything validated — now commit stock + build order ----------------
-  const orderItems = prepared.map(({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee }) => ({
-    product: product._id,
-    variant: variantDoc ? variantDoc._id : null,
-    variantLabel: variantDoc ? variantDoc.combination.map((c) => c.value).join(' / ') : '',
-    seller: product.seller,
-    sellerRole: product.sellerRole,
-    name: product.name,
-    image: product.images[0],
-    quantity,
-    priceAtPurchase: unitPrice,
-    sellerPriceAtPurchase: sellerUnitPrice,
-    deliveryFee,
-  }));
+  const orderItems = prepared.map(
+    ({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee, flashSale }) => ({
+      product: product._id,
+      variant: variantDoc ? variantDoc._id : null,
+      variantLabel: variantDoc ? variantDoc.combination.map((c) => c.value).join(' / ') : '',
+      seller: product.seller,
+      sellerRole: product.sellerRole,
+      name: product.name,
+      image: product.images[0],
+      quantity,
+      priceAtPurchase: unitPrice,
+      sellerPriceAtPurchase: sellerUnitPrice,
+      deliveryFee,
+      isFlashDeal: !!flashSale,
+      flashSale: flashSale ? flashSale._id : null,
+    })
+  );
 
-  for (const { product, variantDoc, quantity } of prepared) {
+  for (const { product, variantDoc, quantity, flashSale } of prepared) {
+    if (flashSale) {
+      // Flash Sale stock is its own pool — never touches the product's
+      // regular stock counter. Deplete it and flip to sold_out the instant
+      // it runs dry, same as recordFlashSaleSale() does, but against the
+      // exact FlashSale doc we already validated above (avoids re-querying
+      // "the active one for this product", which matters if a product ever
+      // has more than one historical Flash Sale entry).
+      const updated = await FlashSale.findByIdAndUpdate(
+        flashSale._id,
+        { $inc: { stockSold: quantity } },
+        { new: true }
+      );
+      if (updated && updated.stockSold >= updated.stockAllocated) {
+        updated.status = 'sold_out';
+        await updated.save();
+      }
+      continue; // no regular Product.stock decrement for Flash Sale lines
+    }
+
     if (variantDoc) {
       await ProductVariant.findByIdAndUpdate(variantDoc._id, { $inc: { stock: -quantity } });
     }
     await Product.findByIdAndUpdate(product._id, { $inc: { stock: -quantity } });
   }
 
-  // --- Retail transport (region/town) — no server-side rate table yet, so this
-  // stays client-supplied like shippingAddress, just sanity-clamped to >= 0.
-  // Now correctly applies whenever hasRetailItem is true, which includes both
-  // true retail items AND 'simple' (light) wholesale items.
-  // Wholesale 'heavy' delivery above is fully server-computed and authoritative. ---
   const retailTransportFee = hasRetailItem ? Math.max(0, Number(transportFee) || 0) : 0;
   const deliveryFeeTotal = retailTransportFee + wholesaleDeliveryTotal;
   const totalAmount = itemsTotal + deliveryFeeTotal;
 
-  // --- Optional agent commission ---
   let agentDoc = null;
   let commissionAmount = 0;
   if (agentCode && agentCode.trim()) {
@@ -254,7 +312,6 @@ const createOrder = asyncHandler(async (req, res) => {
     agentCode: agentDoc ? agentDoc.code : '',
     commissionAmount,
   });
-  // order.orderNumber is set automatically by the pre('save') hook on the model
 
   if (agentDoc) {
     await Agent.findByIdAndUpdate(agentDoc._id, {
@@ -268,7 +325,6 @@ const createOrder = asyncHandler(async (req, res) => {
     order,
   });
 
-  // ---------------- EMAILS (fire-and-forget, never block the response) ----------------
   sendOrderEmails(order, req.user).catch((err) =>
     console.error('createOrder email dispatch failed:', err)
   );

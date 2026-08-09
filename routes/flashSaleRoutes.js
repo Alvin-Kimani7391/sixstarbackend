@@ -12,19 +12,24 @@ const {
   cancelMyFlashSale,
   getActiveFlashSales,
   getTodayFlashSales, // <-- new
+  getFlashSaleById,
 } = require('../controllers/flashSaleController');
 const { protect, authorize } = require('../middleware/authMiddleware');
 
 // ---------- Public storefront ----------
 // Powers a "Flash Sale" rail/page on the buyer-facing site — everything
 // currently inside its 2:00 PM-midnight window with stock left.
+// ---------- Public storefront ----------
 router.get('/active', getActiveFlashSales);
-router.get('/today', getTodayFlashSales); // <-- new, keep both — /active still useful elsewhere
+router.get('/today', getTodayFlashSales);
+
 // ---------- Seller-only ----------
-// NOTE: '/my' is declared before any '/:id' style route so Express doesn't
-// try to treat "my" as an id (same rule already used in productRoutes.js).
 router.get('/my', protect, authorize('wholesaler', 'retailer'), getMyFlashSales);
 router.post('/', protect, authorize('wholesaler', 'retailer'), submitFlashSale);
 router.patch('/:id/cancel', protect, authorize('wholesaler', 'retailer'), cancelMyFlashSale);
+
+// ---------- Public: single Flash Sale by id ----------
+// MUST come after /active, /today, /my so Express doesn't swallow them as an :id.
+router.get('/:id', getFlashSaleById);
 
 module.exports = router;
