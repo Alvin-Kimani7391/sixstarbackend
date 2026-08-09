@@ -8,6 +8,7 @@ const {
   deleteProduct,
   getProducts,
   getProductById,
+  getProductSuggestions,   // <-- add
   trackProductViewCount,
   getMyProductAnalytics,
 } = require('../controllers/productController');
@@ -22,6 +23,7 @@ router.get('/', getProducts);
 // treat "my-products" / "analytics" as an :id value and route it to getProductById instead
 router.get('/my-products', protect, authorize('wholesaler', 'retailer'), getMyProducts);
 router.get('/analytics', protect, authorize('wholesaler', 'retailer'), getMyProductAnalytics);
+router.get('/suggestions', getProductSuggestions);   // <-- add this line here
 router.post('/', protect, authorize('wholesaler', 'retailer'), uploadProductImages, createProduct);
 
 router.get('/:id', getProductById);

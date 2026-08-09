@@ -69,6 +69,7 @@ app.use('/api/shop-reviews', require('./routes/shopReviewRoutes'));
 app.use('/api/seller-verification', require('./routes/sellerVerificationRoutes'));
 app.use('/api/seller-profile', require('./routes/sellerProfileRoutes'));
 app.use('/api/flash-sales', require('./routes/flashSaleRoutes'));
+app.use('/', require('./routes/seoRoutes'));
 
 app.set('trust proxy', 1);
 app.use('/api/legal-documents', require('./routes/legalDocumentRoutes'));

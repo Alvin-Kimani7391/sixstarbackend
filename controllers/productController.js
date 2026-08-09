@@ -799,6 +799,74 @@ const getProductById = asyncHandler(async (req, res) => {
   res.json({ success: true, product });
 });
 
+
+
+/**
+ * ADD THIS to backend/controllers/productController.js
+ * -----------------------------------------------------------------------
+ * Paste the function below anywhere among your other exported controllers
+ * (e.g. right after getProductById), and add `getProductSuggestions` to
+ * the module.exports list at the bottom of the file.
+ *
+ * Reuses the same escapeRegex() helper and 'active'/'isActive' filtering
+ * your existing getProducts() already uses, just trimmed down to a fast,
+ * small-payload response suited for calling on every keystroke.
+ * -----------------------------------------------------------------------
+ */
+
+// @desc    Lightweight autocomplete suggestions for the search box —
+//          matching product names + matching categories, capped small
+//          so it's cheap enough to call on every keystroke (debounced
+//          client-side).
+// @route   GET /api/products/suggestions?q=phone
+// @access  Public
+const getProductSuggestions = asyncHandler(async (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) {
+    return res.json({ success: true, query: q, products: [], categories: [] });
+  }
+
+  const regex = new RegExp(escapeRegex(q), 'i');
+
+  const [products, categories] = await Promise.all([
+    Product.find({ status: 'active', isActive: true, name: regex })
+      .select('name images finalPrice discountPercent')
+      .limit(8),
+    Category.find({ name: regex, isActive: true }).select('name slug').limit(4),
+  ]);
+
+  res.json({
+    success: true,
+    query: q,
+    products: products.map((p) => ({
+      id: p._id,
+      name: p.name,
+      image: (p.images && p.images[0]) || '',
+      price: p.discountPercent
+        ? Math.round(p.finalPrice * (1 - p.discountPercent / 100))
+        : p.finalPrice,
+    })),
+    categories: categories.map((c) => ({ id: c._id, name: c.name, slug: c.slug })),
+  });
+});
+
+// Then add getProductSuggestions to module.exports, e.g.:
+//
+// module.exports = {
+//   createProduct,
+//   updateProduct,
+//   submitProductForReview,
+//   getMyProducts,
+//   deleteProduct,
+//   getProducts,
+//   getProductById,
+//   getProductSuggestions,   // <-- add this line
+//   trackProductViewCount,
+//   getMyProductAnalytics,
+// };
+
+
+
 // ---------------- ANALYTICS ----------------
 
 // @desc    Fire-and-forget: increments a product's lifetime view counter and logs
@@ -884,6 +952,7 @@ module.exports = {
   deleteProduct,
   getProducts,
   getProductById,
+  getProductSuggestions,
   trackProductViewCount,
   getMyProductAnalytics,
 };
