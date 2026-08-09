@@ -5,7 +5,8 @@ const ProductVariant = require('../models/ProductVariant');
 const Agent = require('../models/Agent');
 const FlashSale = require('../models/FlashSale');
 const { User } = require('../models/User');
-const sendEmail = require('../utils/sendEmail');
+const safeSendEmail = require('../utils/safeSendEmail');
+const getAdminEmails = require('../utils/getAdminEmails');
 const {
   orderConfirmationTemplate,
   newOrderSellerTemplate,
@@ -53,21 +54,6 @@ function isNegotiatedDelivery(product) {
     !product.freeDelivery &&
     product.deliveryCharge?.chargeType === 'negotiated'
   );
-}
-
-// Best-effort admin recipient list: explicit env override first, otherwise every
-// user with role "admin". A logging failure here should never break checkout.
-async function getAdminEmails() {
-  if (process.env.ADMIN_EMAILS) {
-    return process.env.ADMIN_EMAILS.split(',').map((s) => s.trim()).filter(Boolean);
-  }
-  const admins = await User.find({ role: 'admin' }).select('email');
-  return admins.map((a) => a.email).filter(Boolean);
-}
-
-// Fire-and-forget wrapper so a SendGrid hiccup never fails the HTTP response.
-function safeSendEmail(opts, label) {
-  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
 }
 
 // @desc    Buyer places an order and pastes their M-Pesa confirmation message
@@ -244,7 +230,12 @@ const createOrder = asyncHandler(async (req, res) => {
       seller: product.seller,
       sellerRole: product.sellerRole,
       name: product.name,
-      image: product.images[0],
+      // Snapshot the FULL absolute Cloudinary URL at time of purchase. If
+      // product.images ever ends up empty for a line (deleted image, race
+      // condition, etc.), this stays '' and orderItemsTable() in
+      // emailTemplates.js falls back to a themed placeholder instead of a
+      // broken-image icon.
+      image: product.images && product.images[0] ? product.images[0] : '',
       quantity,
       priceAtPurchase: unitPrice,
       sellerPriceAtPurchase: sellerUnitPrice,

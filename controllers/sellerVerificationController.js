@@ -2,6 +2,14 @@ const asyncHandler = require('express-async-handler');
 const SellerVerification = require('../models/SellerVerification');
 const LegalDocument = require('../models/LegalDocument');
 const SellerAcceptance = require('../models/SellerAcceptance');
+const { User } = require('../models/User');
+const safeSendEmail = require('../utils/safeSendEmail');
+const getAdminEmails = require('../utils/getAdminEmails');
+const {
+  verificationSubmittedSellerTemplate,
+  verificationSubmittedAdminTemplate,
+  verificationDecisionTemplate,
+} = require('../utils/emailTemplates');
 
 const CATEGORY_OPTIONS = SellerVerification.CATEGORY_OPTIONS;
 const BUSINESS_AGE_OPTIONS = ['lt_6m', '6_12m', '1_3y', 'gt_3y'];
@@ -270,6 +278,37 @@ const submitVerification = asyncHandler(async (req, res) => {
   }
 
   res.json({ success: true, verification: record, message: 'Submitted for review' });
+
+  // ---- Receipt emails: one to the seller, one to admins ----
+  if (req.user.email) {
+    safeSendEmail(
+      {
+        to: req.user.email,
+        subject: 'We\u2019ve Received Your Verification Documents',
+        html: verificationSubmittedSellerTemplate({ sellerName: req.user.name, tier }),
+      },
+      'Seller verification receipt (seller)'
+    );
+  }
+
+  getAdminEmails()
+    .then((adminEmails) => {
+      adminEmails.forEach((to) => {
+        safeSendEmail(
+          {
+            to,
+            subject: `New Seller Verification Submitted - ${req.user.name || req.user.email}`,
+            html: verificationSubmittedAdminTemplate({
+              sellerName: req.user.name,
+              sellerEmail: req.user.email,
+              tier,
+            }),
+          },
+          'Seller verification receipt (admin)'
+        );
+      });
+    })
+    .catch((err) => console.error('Failed to resolve admin emails:', err.message));
 });
 
 // ============================================================
@@ -308,6 +347,18 @@ const approveVerification = asyncHandler(async (req, res) => {
   record.reviewedBy = req.user.id;
   await record.save();
   res.json({ success: true, verification: record });
+
+  const seller = await User.findById(record.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: 'You\u2019re Verified! \ud83c\udf89',
+        html: verificationDecisionTemplate({ sellerName: seller.name, decision: 'approved' }),
+      },
+      'Seller verification decision (approved)'
+    );
+  }
 });
 
 const rejectVerification = asyncHandler(async (req, res) => {
@@ -321,6 +372,18 @@ const rejectVerification = asyncHandler(async (req, res) => {
   record.reviewedBy = req.user.id;
   await record.save();
   res.json({ success: true, verification: record });
+
+  const seller = await User.findById(record.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: 'Your Seller Verification Needs Changes',
+        html: verificationDecisionTemplate({ sellerName: seller.name, decision: 'rejected', reason }),
+      },
+      'Seller verification decision (rejected)'
+    );
+  }
 });
 
 module.exports = {

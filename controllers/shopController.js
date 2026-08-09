@@ -1,6 +1,14 @@
 const asyncHandler = require('express-async-handler');
 const Shop = require('../models/Shop');
 const Product = require('../models/Product');
+const { User } = require('../models/User');
+const safeSendEmail = require('../utils/safeSendEmail');
+const getAdminEmails = require('../utils/getAdminEmails');
+const {
+  shopSubmittedSellerTemplate,
+  shopSubmittedAdminTemplate,
+  shopDecisionTemplate,
+} = require('../utils/emailTemplates');
 
 // ---------------------------------------------------------------------------
 // Shared helper — used by productController to silently attach a product to
@@ -22,6 +30,37 @@ function parseThemeConfiguration(raw, fallback = {}) {
   } catch {
     return fallback;
   }
+}
+
+// Fires the "submitted for review" receipt to the seller and the
+// "needs review" alert to admins. Shared by createShop and the
+// re-submission path in updateMyShop so both places stay in sync.
+function sendShopSubmissionEmails({ sellerName, sellerEmail, shop }) {
+  if (sellerEmail) {
+    safeSendEmail(
+      {
+        to: sellerEmail,
+        subject: `Shop Submitted for Approval - ${shop.shopName}`,
+        html: shopSubmittedSellerTemplate({ sellerName, shop }),
+      },
+      'Shop receipt (seller)'
+    );
+  }
+
+  getAdminEmails()
+    .then((adminEmails) => {
+      adminEmails.forEach((to) => {
+        safeSendEmail(
+          {
+            to,
+            subject: `New Shop Submitted - ${shop.shopName}`,
+            html: shopSubmittedAdminTemplate({ sellerName, sellerEmail, shop }),
+          },
+          'Shop receipt (admin)'
+        );
+      });
+    })
+    .catch((err) => console.error('Failed to resolve admin emails:', err.message));
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +112,8 @@ const createShop = asyncHandler(async (req, res) => {
   });
 
   res.status(201).json({ success: true, message: 'Shop submitted for admin approval', shop });
+
+  sendShopSubmissionEmails({ sellerName: req.user.name, sellerEmail: req.user.email, shop });
 });
 
 
@@ -101,7 +142,9 @@ const getMyShop = asyncHandler(async (req, res) => {
 
 // @desc    Seller updates their own shop's basic info. Any update on an already
 //          approved shop sends it back to pending_approval, mirroring the
-//          product edit-while-live behavior.
+//          product edit-while-live behavior — and, same as a fresh shop
+//          submission, fires the seller receipt + admin review-needed emails
+//          again so the re-review doesn't sit silently.
 //          Logo/banner: only replaced if a new file was actually uploaded in
 //          this request (req.files.logo / req.files.banner) — otherwise the
 //          existing Cloudinary URLs on the shop are left untouched, so the
@@ -150,6 +193,13 @@ const updateMyShop = asyncHandler(async (req, res) => {
 
   await shop.save();
   res.json({ success: true, shop });
+
+  // Only fire the submission emails when this edit actually pulled a
+  // previously-approved shop back into the review queue — routine edits to
+  // a shop that's still pending/rejected/suspended shouldn't spam anyone.
+  if (wasApproved) {
+    sendShopSubmissionEmails({ sellerName: req.user.name, sellerEmail: req.user.email, shop });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -202,6 +252,18 @@ const approveShop = asyncHandler(async (req, res) => {
   shop.reviewedAt = new Date();
   await shop.save();
   res.json({ success: true, message: 'Shop approved', shop });
+
+  const seller = await User.findById(shop.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `Shop Approved - ${shop.shopName}`,
+        html: shopDecisionTemplate({ sellerName: seller.name, shop, decision: 'approved' }),
+      },
+      'Shop decision (approved)'
+    );
+  }
 });
 
 // @desc    Admin rejects a shop with a reason
@@ -225,6 +287,18 @@ const rejectShop = asyncHandler(async (req, res) => {
   shop.isFeatured = false;
   await shop.save();
   res.json({ success: true, message: 'Shop rejected', shop });
+
+  const seller = await User.findById(shop.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `Shop Rejected - ${shop.shopName}`,
+        html: shopDecisionTemplate({ sellerName: seller.name, shop, decision: 'rejected', reason }),
+      },
+      'Shop decision (rejected)'
+    );
+  }
 });
 
 // @desc    Admin suspends an approved shop

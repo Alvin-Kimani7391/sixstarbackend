@@ -24,12 +24,25 @@
    product's regular stock. It depletes the Flash Sale's own stock
    pool and flips it to 'sold_out' the instant it runs out — even
    mid-window, without waiting for the next scheduler tick.
+
+   Emails: every submission fires a receipt to the submitting seller
+   AND a review-needed alert to admins; every approve/reject fires a
+   decision email back to the seller. All sends are fire-and-forget
+   (safeSendEmail) so a SendGrid hiccup never breaks the API response.
    ============================================================ */
 
 const asyncHandler = require('express-async-handler');
 const FlashSale = require('../models/FlashSale');
 const Product = require('../models/Product');
+const { User } = require('../models/User');
 const { FLASH_SALE_START_HOUR, MIN_LEAD_TIME_HOURS } = require('../utils/flashSaleConfig');
+const safeSendEmail = require('../utils/safeSendEmail');
+const getAdminEmails = require('../utils/getAdminEmails');
+const {
+  flashSaleSubmittedSellerTemplate,
+  flashSaleSubmittedAdminTemplate,
+  flashSaleDecisionTemplate,
+} = require('../utils/emailTemplates');
 
 const ACTIVE_PIPELINE_STATUSES = ['pending_review', 'approved', 'scheduled', 'active'];
 const CANCELLABLE_STATUSES = ['pending_review', 'approved', 'scheduled'];
@@ -145,6 +158,42 @@ const submitFlashSale = asyncHandler(async (req, res) => {
   );
 
   res.status(201).json({ success: true, flashSale: populated });
+
+  // ---- Receipt emails: one to the seller, one to admins ----
+  if (req.user.email) {
+    safeSendEmail(
+      {
+        to: req.user.email,
+        subject: `Flash Sale Submitted - ${product.name}`,
+        html: flashSaleSubmittedSellerTemplate({
+          sellerName: req.user.name,
+          product,
+          flashSale: populated,
+        }),
+      },
+      'Flash Sale receipt (seller)'
+    );
+  }
+
+  getAdminEmails()
+    .then((adminEmails) => {
+      adminEmails.forEach((to) => {
+        safeSendEmail(
+          {
+            to,
+            subject: `New Flash Sale Submitted - ${product.name}`,
+            html: flashSaleSubmittedAdminTemplate({
+              sellerName: req.user.name,
+              sellerEmail: req.user.email,
+              product,
+              flashSale: populated,
+            }),
+          },
+          'Flash Sale receipt (admin)'
+        );
+      });
+    })
+    .catch((err) => console.error('Failed to resolve admin emails:', err.message));
 });
 
 // @desc    Seller's own Flash Sale submissions, any status
@@ -337,7 +386,7 @@ const getAllFlashSalesAdmin = asyncHandler(async (req, res) => {
 // @route   PATCH /api/admin/flash-sales/:id/approve
 // @access  Private (admin)
 const approveFlashSale = asyncHandler(async (req, res) => {
-  const flashSale = await FlashSale.findById(req.params.id);
+  const flashSale = await FlashSale.findById(req.params.id).populate('product', 'name images');
   if (!flashSale) {
     res.status(404);
     throw new Error('Flash Sale submission not found');
@@ -363,6 +412,23 @@ const approveFlashSale = asyncHandler(async (req, res) => {
   await flashSale.save();
 
   res.json({ success: true, message: 'Flash Sale approved', flashSale });
+
+  const seller = await User.findById(flashSale.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `Flash Sale Approved - ${flashSale.product.name}`,
+        html: flashSaleDecisionTemplate({
+          sellerName: seller.name,
+          product: flashSale.product,
+          flashSale,
+          decision: 'approved',
+        }),
+      },
+      'Flash Sale decision (approved)'
+    );
+  }
 });
 
 // @desc    Admin rejects a pending Flash Sale submission with a reason
@@ -375,7 +441,7 @@ const rejectFlashSale = asyncHandler(async (req, res) => {
     throw new Error('A rejection reason is required');
   }
 
-  const flashSale = await FlashSale.findById(req.params.id);
+  const flashSale = await FlashSale.findById(req.params.id).populate('product', 'name images');
   if (!flashSale) {
     res.status(404);
     throw new Error('Flash Sale submission not found');
@@ -392,6 +458,24 @@ const rejectFlashSale = asyncHandler(async (req, res) => {
   await flashSale.save();
 
   res.json({ success: true, message: 'Flash Sale rejected', flashSale });
+
+  const seller = await User.findById(flashSale.seller).select('name email');
+  if (seller?.email) {
+    safeSendEmail(
+      {
+        to: seller.email,
+        subject: `Flash Sale Rejected - ${flashSale.product.name}`,
+        html: flashSaleDecisionTemplate({
+          sellerName: seller.name,
+          product: flashSale.product,
+          flashSale,
+          decision: 'rejected',
+          reason,
+        }),
+      },
+      'Flash Sale decision (rejected)'
+    );
+  }
 });
 
 

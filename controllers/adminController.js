@@ -2,16 +2,12 @@ const asyncHandler = require('express-async-handler');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
 const { User } = require('../models/User');
-const sendEmail = require('../utils/sendEmail');
+const safeSendEmail = require('../utils/safeSendEmail');
 const {
   productApprovedTemplate,
   productRejectedTemplate,
   paymentDecisionTemplate,
 } = require('../utils/emailTemplates');
-
-function safeSendEmail(opts, label) {
-  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
-}
 
 // @desc    Get ALL products regardless of status - the main dashboard product table
 // @route   GET /api/admin/products?status=active&search=phone&page=1&limit=20

@@ -2,8 +2,9 @@
 //
 // Central template library for every transactional email in the app.
 // Every email is built on top of baseLayout() so signup, password reset,
-// order, product-review and agent emails all share one modern visual system
-// (gradient header, card body, consistent buttons/badges/tables).
+// order, product-review, seller-verification (KYC), flash-sale, shop and
+// agent emails all share one visual system (navy header, warm paper body,
+// consistent buttons/badges/tables).
 //
 // Usage: const { welcomeEmailTemplate } = require('../utils/emailTemplates');
 //        await sendEmail({ to, subject, html: welcomeEmailTemplate({ name, role }) });
@@ -12,26 +13,37 @@ const FRONTEND_URL = (process.env.FRONTEND_URL || 'https://sixstarsuppliers.com'
 const ADMIN_URL = (process.env.ADMIN_URL || `${FRONTEND_URL}/admin`).replace(/\/+$/, '');
 const BRAND_NAME = 'Six Star Suppliers';
 
+/* ------------------------------------------------------------------ */
+/* THEME — deep navy + a muted marigold accent, warm paper background. */
+/* Toned down from the old pure-black/bright-orange combo so the       */
+/* emails read as professional rather than promotional.                */
+/* ------------------------------------------------------------------ */
 const COLORS = {
-  ink: '#0f172a',
-  muted: '#64748b',
-  border: '#e5e7eb',
-  bg: '#f4f4f4',
+  ink: '#1f2937',
+  muted: '#68707c',
+  border: '#e7e2d6',
+  bg: '#f6f3ec',          // warm paper, not flat gray
   card: '#ffffff',
-  headerFrom: '#000000',
-  headerTo: '#ff6600',
-  accent: '#ff6600',
-  accentDark: '#b34700',
-  success: '#059669',
-  warning: '#d97706',
-  danger: '#dc2626',
-  chip: '#fff4ec',
+  headerFrom: '#101d31',  // deep navy
+  headerTo: '#1c3357',    // lighter navy
+  accent: '#c9791f',      // muted marigold (was neon #ff6600)
+  accentDark: '#9c5e15',
+  success: '#1f7a4d',
+  warning: '#b45309',
+  danger: '#b3261e',
+  chip: '#faf1e2',        // soft marigold tint for chips/callouts
 };
 
 const money = (n) => `KES ${Number(n || 0).toLocaleString()}`;
 
 const fmtDate = (d) =>
   new Date(d).toLocaleDateString('en-KE', { day: 'numeric', month: 'short', year: 'numeric' });
+
+// Stable, still-hosted placeholder — via.placeholder.com has been retired,
+// so any email that fell back to it rendered a broken-image icon instead of
+// an actual picture. placehold.co is colored to match the theme's paper/ink
+// tones so it blends in even when a product genuinely has no image.
+const NO_IMAGE_FALLBACK = 'https://placehold.co/96x96/f0ece1/8a8f98?text=No+Image';
 
 /* ---------------------------------------------------------------- */
 /* Base shell — header / body / footer                               */
@@ -84,6 +96,7 @@ function baseLayout({ preheader = '', eyebrow = '', title = '', intro = '', body
     .ss-otp-box { width:15% !important; padding:0 3px !important; }
     .ss-otp-digit { width:100% !important; height:44px !important; font-size:18px !important; }
     .ss-stack { display:block !important; width:100% !important; }
+    .ss-item-thumb { width:56px !important; height:56px !important; }
   }
 
   @media (prefers-color-scheme: dark) {
@@ -107,13 +120,13 @@ function baseLayout({ preheader = '', eyebrow = '', title = '', intro = '', body
       <td align="center" class="ss-wrapper-pad" style="padding:32px 12px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;width:100%;">
           <tr>
-            <td class="ss-card" style="background:${COLORS.card};border-radius:16px;overflow:hidden;box-shadow:0 10px 40px rgba(15,23,42,0.10);">
+            <td class="ss-card" style="background:${COLORS.card};border-radius:16px;overflow:hidden;box-shadow:0 10px 40px rgba(16,29,49,0.10);">
 
               <!-- HEADER -->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td class="ss-header-pad" style="background:${COLORS.headerFrom};background-image:linear-gradient(135deg,${COLORS.headerFrom},${COLORS.headerTo});padding:32px 36px;text-align:center;">
-                    <div style="font-size:12px;letter-spacing:2px;color:rgba(255,255,255,0.65);text-transform:uppercase;font-weight:600;margin-bottom:8px;">
+                    <div style="font-size:12px;letter-spacing:2px;color:rgba(255,255,255,0.62);text-transform:uppercase;font-weight:600;margin-bottom:8px;">
                       ${eyebrow || BRAND_NAME}
                     </div>
                     <div class="ss-title" style="font-size:22px;font-weight:700;color:#ffffff;letter-spacing:0.2px;">
@@ -136,7 +149,7 @@ function baseLayout({ preheader = '', eyebrow = '', title = '', intro = '', body
               <!-- FOOTER -->
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
-                  <td class="ss-footer ss-footer-pad ss-border" style="background:#f8fafc;padding:22px 36px;text-align:center;border-top:1px solid ${COLORS.border};">
+                  <td class="ss-footer ss-footer-pad ss-border" style="background:#faf7f1;padding:22px 36px;text-align:center;border-top:1px solid ${COLORS.border};">
                     ${footerNote ? `<p class="ss-muted" style="margin:0 0 8px;font-size:12px;color:${COLORS.muted};">${footerNote}</p>` : ''}
                     <p class="ss-muted" style="margin:0;font-size:12px;color:${COLORS.muted};">
                       © ${new Date().getFullYear()} ${BRAND_NAME}. All rights reserved.
@@ -201,24 +214,73 @@ function statusBadge(text, tone = 'accent') {
   return `<span style="display:inline-block;padding:6px 14px;border-radius:999px;background:${c}1A;color:${c};font-size:12px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;">${text}</span>`;
 }
 
-// Renders an itemized order table WITH product images — used by every order email.
+// Reason/callout box used by every "rejected" style email (products, flash
+// sales, shops, seller verification) so the tone stays consistent.
+function reasonBox(reason) {
+  if (!reason) return '';
+  return `
+    <div style="background:#fdf0ee;border:1px solid #f2c8c1;border-radius:10px;padding:14px 16px;margin:8px 0 20px;">
+      <div style="font-size:12px;font-weight:700;color:${COLORS.danger};text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;">
+        Reason
+      </div>
+      <div style="font-size:13px;color:${COLORS.ink};line-height:1.6;">${reason}</div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
+// Renders an itemized order table WITH product images — used by every order
+// email.
+//
+// THE IMAGE FIX: previously this fell back to via.placeholder.com, a service
+// that has been shut down — so ANY item missing an image (or any client that
+// couldn't reach that dead host) rendered a broken-image icon, which is very
+// likely what you were seeing even on real orders. That fallback now points
+// at placehold.co (active, theme-colored). Real product images are also
+// rendered with explicit width/height + a background color behind them so
+// the layout never collapses even if a client blocks remote images.
+//
+// If your OWN Cloudinary product images still don't show up after this
+// change, the most common causes are:
+//   1) The image field on the product is actually empty/null for that item
+//      (check item.image on the Order document itself).
+//   2) The Cloudinary upload preset used for PRODUCT images is set to
+//      "signed"/authenticated delivery (the same pattern used for the
+//      admin-only PDF documents) — signed URLs expire and email clients
+//      can't attach auth headers, so they'll never load. Product images
+//      should always be uploaded as unsigned/public delivery, unlike the
+//      verification PDFs.
+//   3) The stored URL is a relative path instead of the full Cloudinary
+//      secure_url — always store `file.path`/`file.secure_url`, never a
+//      local disk path, or it will 404 outside your own server.
+// ---------------------------------------------------------------------------
 function orderItemsTable(items) {
   const rows = (items || [])
     .map((item) => {
-      const img = item.image || 'https://via.placeholder.com/80x80.png?text=No+Image';
+      const img = (item.image && String(item.image).trim()) || NO_IMAGE_FALLBACK;
+      const safeName = item.name || 'Product';
       const variant = item.variantLabel
         ? `<div style="font-size:12px;color:${COLORS.muted};margin-top:2px;">${item.variantLabel}</div>`
+        : '';
+      const flashTag = item.isFlashDeal
+        ? `<div style="margin-top:4px;">${statusBadge('Flash Sale', 'accent')}</div>`
         : '';
       const lineTotal = money((item.priceAtPurchase || 0) * (item.quantity || 1));
       return `
       <tr>
-        <td style="padding:12px 0;border-bottom:1px solid ${COLORS.border};width:64px;">
-          <img src="${img}" width="64" height="64" alt="${item.name || 'Product'}"
-            style="width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid ${COLORS.border};display:block;">
+        <td class="ss-item-thumb" style="padding:12px 0;border-bottom:1px solid ${COLORS.border};width:64px;background:${COLORS.card};">
+          <table role="presentation" cellpadding="0" cellspacing="0" style="width:64px;height:64px;background:${COLORS.chip};border-radius:10px;border:1px solid ${COLORS.border};">
+            <tr>
+              <td align="center" valign="middle" style="width:64px;height:64px;">
+                <img src="${img}" width="64" height="64" alt="${safeName}"
+                  style="width:64px;height:64px;object-fit:cover;border-radius:10px;display:block;">
+              </td>
+            </tr>
+          </table>
         </td>
         <td style="padding:12px 14px;border-bottom:1px solid ${COLORS.border};vertical-align:top;">
-          <div style="font-size:14px;font-weight:600;color:${COLORS.ink};">${item.name}</div>
+          <div style="font-size:14px;font-weight:600;color:${COLORS.ink};">${safeName}</div>
           ${variant}
+          ${flashTag}
           <div style="font-size:12px;color:${COLORS.muted};margin-top:2px;">Qty: ${item.quantity} × ${money(item.priceAtPurchase)}</div>
         </td>
         <td style="padding:12px 0;border-bottom:1px solid ${COLORS.border};text-align:right;vertical-align:top;">
@@ -491,7 +553,7 @@ function paymentDecisionTemplate({ order, buyerName, decision }) {
 
 function productSubmittedAdminTemplate({ product, sellerName }) {
   const reviewUrl = `${ADMIN_URL}/products/pending`;
-  const img = (product.images && product.images[0]) || 'https://via.placeholder.com/80x80.png?text=No+Image';
+  const img = (product.images && product.images[0]) || NO_IMAGE_FALLBACK;
 
   const bodyHtml = `
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:8px 0 18px;">
@@ -542,12 +604,7 @@ function productRejectedTemplate({ product, sellerName, reason }) {
   const editUrl = `${FRONTEND_URL}/seller/products/${product._id}/edit`;
   const bodyHtml = `
     ${infoCard([['Product', product.name]])}
-    <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:14px 16px;margin:8px 0 20px;">
-      <div style="font-size:12px;font-weight:700;color:${COLORS.danger};text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;">
-        Reason for rejection
-      </div>
-      <div style="font-size:13px;color:${COLORS.ink};line-height:1.6;">${reason}</div>
-    </div>
+    ${reasonBox(reason)}
     ${button(editUrl, 'Edit &amp; Resubmit', COLORS.danger)}
   `;
 
@@ -556,6 +613,236 @@ function productRejectedTemplate({ product, sellerName, reason }) {
     eyebrow: 'Product Rejected',
     title: 'Your Product Needs Changes',
     intro: `Hi ${sellerName || 'there'}, your product wasn't approved this time. Here's why:`,
+    bodyHtml,
+  });
+}
+
+/* ================================================================ */
+/* SELLER VERIFICATION (KYC) EMAILS                                  */
+/* ================================================================ */
+
+// Seller-facing receipt, sent the moment documents are submitted (or
+// resubmitted after a rejection).
+function verificationSubmittedSellerTemplate({ sellerName, tier }) {
+  const tierLabel = tier === 'business' ? 'Business' : 'Basic (ID + KRA)';
+  const statusUrl = `${FRONTEND_URL}/seller/verification`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Verification Tier', tierLabel],
+      ['Status', 'Pending Review'],
+    ])}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      Our team typically reviews submissions within 24–48 hours. We'll email you the outcome as soon as a decision is made.
+    </p>
+    ${button(statusUrl, 'View Submission Status')}
+  `;
+  return baseLayout({
+    preheader: `We've received your verification documents, ${sellerName || 'there'}.`,
+    eyebrow: 'Seller Verification',
+    title: 'Documents Received ✅',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'}, thanks for submitting your seller verification documents.`,
+    bodyHtml,
+    footerNote: 'Keep an eye on your inbox — we\u2019ll notify you the moment your review is complete.',
+  });
+}
+
+// Admin notification — a seller's KYC package is ready for review.
+function verificationSubmittedAdminTemplate({ sellerName, sellerEmail, tier }) {
+  const reviewUrl = `${ADMIN_URL}/seller-verifications?status=pending`;
+  const tierLabel = tier === 'business' ? 'Business' : 'Basic (ID + KRA)';
+  const bodyHtml = `
+    ${infoCard([
+      ['Seller', sellerName || 'N/A'],
+      ['Email', sellerEmail || 'N/A'],
+      ['Tier', tierLabel],
+    ])}
+    ${button(reviewUrl, 'Review Submission', COLORS.warning)}
+  `;
+  return baseLayout({
+    preheader: `${sellerName || 'A seller'} submitted verification documents for review`,
+    eyebrow: 'Admin Alert',
+    title: 'New Seller Verification Submitted',
+    intro: 'A seller just submitted their verification documents and is waiting for review.',
+    bodyHtml,
+  });
+}
+
+// Seller-facing decision — approved or rejected, with reason when rejected.
+function verificationDecisionTemplate({ sellerName, decision, reason }) {
+  const isApproved = decision === 'approved';
+  const dashboardUrl = `${FRONTEND_URL}/seller/dashboard`;
+  const editUrl = `${FRONTEND_URL}/seller/verification`;
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      ${statusBadge(isApproved ? 'Verified' : 'Not Approved', isApproved ? 'success' : 'danger')}
+    </div>
+    ${!isApproved ? reasonBox(reason) : ''}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      ${isApproved
+        ? 'You\u2019re now a verified seller. Your storefront badge is active and buyers can trust your listings at a glance.'
+        : 'Please review the reason above, update your documents, and resubmit for another review.'}
+    </p>
+    ${button(isApproved ? dashboardUrl : editUrl, isApproved ? 'Go to Dashboard' : 'Update &amp; Resubmit', isApproved ? COLORS.success : COLORS.danger)}
+  `;
+  return baseLayout({
+    preheader: isApproved ? 'Your seller verification was approved' : 'Your seller verification needs changes',
+    eyebrow: 'Seller Verification',
+    title: isApproved ? 'You\u2019re Verified! 🎉' : 'Verification Needs Changes',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+  });
+}
+
+/* ================================================================ */
+/* FLASH SALE EMAILS                                                  */
+/* ================================================================ */
+
+// Seller-facing receipt, sent the moment a Flash Sale is submitted.
+function flashSaleSubmittedSellerTemplate({ sellerName, product, flashSale }) {
+  const statusUrl = `${FRONTEND_URL}/seller/flash-sales`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Product', product.name],
+      ['Flash Sale Price', money(flashSale.flashSalePrice)],
+      ['Units Allocated', String(flashSale.stockAllocated)],
+      ['Sale Date', fmtDate(flashSale.saleDate)],
+      ['Status', 'Pending Review'],
+    ])}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      We'll review your submission and let you know as soon as it's approved or if changes are needed.
+    </p>
+    ${button(statusUrl, 'View My Flash Sales')}
+  `;
+  return baseLayout({
+    preheader: `Your Flash Sale submission for "${product.name}" was received`,
+    eyebrow: 'Flash Sale',
+    title: 'Flash Sale Submitted ✅',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'}, thanks for submitting a Flash Sale.`,
+    bodyHtml,
+  });
+}
+
+// Admin notification — a Flash Sale submission is ready for review.
+function flashSaleSubmittedAdminTemplate({ sellerName, sellerEmail, product, flashSale }) {
+  const reviewUrl = `${ADMIN_URL}/flash-sales?status=pending_review`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Seller', sellerName || 'N/A'],
+      ['Email', sellerEmail || 'N/A'],
+      ['Product', product.name],
+      ['Flash Sale Price', money(flashSale.flashSalePrice)],
+      ['Discount', `${flashSale.discountPercent}%`],
+      ['Units Allocated', String(flashSale.stockAllocated)],
+      ['Sale Date', fmtDate(flashSale.saleDate)],
+    ])}
+    ${button(reviewUrl, 'Review Flash Sale', COLORS.warning)}
+  `;
+  return baseLayout({
+    preheader: `${sellerName || 'A seller'} submitted a Flash Sale for "${product.name}"`,
+    eyebrow: 'Admin Alert',
+    title: 'New Flash Sale Submitted',
+    intro: 'A seller just submitted a Flash Sale and is waiting for review.',
+    bodyHtml,
+  });
+}
+
+// Seller-facing decision — approved or rejected, with reason when rejected.
+function flashSaleDecisionTemplate({ sellerName, product, flashSale, decision, reason }) {
+  const isApproved = decision === 'approved';
+  const manageUrl = `${FRONTEND_URL}/seller/flash-sales`;
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      ${statusBadge(isApproved ? 'Approved' : 'Rejected', isApproved ? 'success' : 'danger')}
+    </div>
+    ${infoCard([
+      ['Product', product.name],
+      ['Flash Sale Price', money(flashSale.flashSalePrice)],
+      ['Sale Date', fmtDate(flashSale.saleDate)],
+    ])}
+    ${!isApproved ? reasonBox(reason) : ''}
+    ${button(manageUrl, isApproved ? 'View Flash Sale' : 'Submit Another', isApproved ? COLORS.success : COLORS.danger)}
+  `;
+  return baseLayout({
+    preheader: isApproved
+      ? `Your Flash Sale for "${product.name}" was approved`
+      : `Your Flash Sale for "${product.name}" was rejected`,
+    eyebrow: 'Flash Sale',
+    title: isApproved ? 'Flash Sale Approved 🎉' : 'Flash Sale Rejected',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+  });
+}
+
+/* ================================================================ */
+/* SHOP EMAILS                                                       */
+/* ================================================================ */
+
+// Seller-facing receipt, sent when a shop is created or resubmitted for
+// review after being edited.
+function shopSubmittedSellerTemplate({ sellerName, shop }) {
+  const statusUrl = `${FRONTEND_URL}/seller/shop`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Shop Name', shop.shopName],
+      ['Status', 'Pending Approval'],
+    ])}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      We'll review your shop details and notify you as soon as a decision is made.
+    </p>
+    ${button(statusUrl, 'View Shop Status')}
+  `;
+  return baseLayout({
+    preheader: `Your shop "${shop.shopName}" was submitted for approval`,
+    eyebrow: 'Shop Setup',
+    title: 'Shop Submitted ✅',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'}, thanks for setting up your shop.`,
+    bodyHtml,
+  });
+}
+
+// Admin notification — a shop is ready for review.
+function shopSubmittedAdminTemplate({ sellerName, sellerEmail, shop }) {
+  const reviewUrl = `${ADMIN_URL}/shops?status=pending_approval`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Seller', sellerName || 'N/A'],
+      ['Email', sellerEmail || 'N/A'],
+      ['Shop Name', shop.shopName],
+      ['Category', shop.businessCategory || 'N/A'],
+    ])}
+    ${button(reviewUrl, 'Review Shop', COLORS.warning)}
+  `;
+  return baseLayout({
+    preheader: `${sellerName || 'A seller'} submitted a shop for approval`,
+    eyebrow: 'Admin Alert',
+    title: 'New Shop Submitted',
+    intro: 'A seller just submitted a shop and is waiting for approval.',
+    bodyHtml,
+  });
+}
+
+// Seller-facing decision — approved or rejected, with reason when rejected.
+function shopDecisionTemplate({ sellerName, shop, decision, reason }) {
+  const isApproved = decision === 'approved';
+  const manageUrl = `${FRONTEND_URL}/seller/shop`;
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      ${statusBadge(isApproved ? 'Approved' : 'Rejected', isApproved ? 'success' : 'danger')}
+    </div>
+    ${infoCard([['Shop Name', shop.shopName]])}
+    ${!isApproved ? reasonBox(reason) : ''}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      ${isApproved
+        ? 'Your shop is now live on the storefront.'
+        : 'Please review the reason above, make changes, and update your shop to resubmit.'}
+    </p>
+    ${button(manageUrl, isApproved ? 'View My Shop' : 'Update Shop', isApproved ? COLORS.success : COLORS.danger)}
+  `;
+  return baseLayout({
+    preheader: isApproved ? `Your shop "${shop.shopName}" was approved` : `Your shop "${shop.shopName}" was rejected`,
+    eyebrow: 'Shop Setup',
+    title: isApproved ? 'Shop Approved 🎉' : 'Shop Needs Changes',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'},`,
     bodyHtml,
   });
 }
@@ -595,14 +882,16 @@ module.exports = {
   button,
   infoCard,
   statusBadge,
+  reasonBox,
   orderItemsTable,
   FRONTEND_URL,
   ADMIN_URL,
+  NO_IMAGE_FALLBACK,
 
   // auth
   welcomeEmailTemplate,
   passwordResetEmailTemplate,
-  emailOtpTemplate, // <-- THE FIX: this line was missing, so require(...).emailOtpTemplate was undefined
+  emailOtpTemplate,
 
   // orders
   orderConfirmationTemplate,
@@ -615,6 +904,21 @@ module.exports = {
   productSubmittedAdminTemplate,
   productApprovedTemplate,
   productRejectedTemplate,
+
+  // seller verification (KYC)
+  verificationSubmittedSellerTemplate,
+  verificationSubmittedAdminTemplate,
+  verificationDecisionTemplate,
+
+  // flash sales
+  flashSaleSubmittedSellerTemplate,
+  flashSaleSubmittedAdminTemplate,
+  flashSaleDecisionTemplate,
+
+  // shops
+  shopSubmittedSellerTemplate,
+  shopSubmittedAdminTemplate,
+  shopDecisionTemplate,
 
   // agents
   agentWelcomeTemplate,
