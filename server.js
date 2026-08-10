@@ -17,7 +17,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// CORS: must allow credentials so the httpOnly auth cookie works across
+// CORS: must allow credentialssdfsfddddd so the httpOnly auth cookie works across
 // your Vercel frontend <-> Render backend (different domains).
 // Uses a function (not a static string) so local dev, your production
 // CLIENT_URL, and any Vercel/Render preview-deploy URL all work without edits.
@@ -27,7 +27,7 @@ const allowedOrigins = [
   'http://localhost:5500',
   'http://127.0.0.1:5500',
   'http://www.sixstarsuppliers.com',
-  
+  'https://sixstarsuppliers.com',
   process.env.CLIENT_URL,
 ].filter(Boolean);
 
