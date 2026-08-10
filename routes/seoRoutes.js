@@ -15,6 +15,14 @@
  *
  * Model requires match your real file names/casing exactly:
  *   models/Product.js, models/Category.js, models/Shop.js
+ *
+ * STATIC_PAGES deliberately does NOT include login.html, register.html,
+ * cart.html, or any other page carrying a `noindex` meta tag / blocked in
+ * robots.txt. Listing a noindex'd or disallowed URL in the sitemap tells
+ * Google two contradictory things at once ("crawl this" via the sitemap,
+ * "don't index this" via the tag/robots.txt) — Search Console will flag
+ * it as a coverage error. Only add a page here once it's meant to be
+ * publicly indexed.
  * -----------------------------------------------------------------------
  */
 
@@ -35,6 +43,7 @@ const STATIC_PAGES = [
   { url: '/wholesale.html', changefreq: 'daily', priority: 0.8 },
   { url: '/shop.html', changefreq: 'weekly', priority: 0.7 },
   { url: '/about.html', changefreq: 'monthly', priority: 0.5 },
+  { url: '/contact.html', changefreq: 'monthly', priority: 0.4 },
 ];
 
 function xmlEscape(str = '') {
@@ -106,7 +115,10 @@ router.get('/sitemap-shops.xml', async (req, res) => {
       .lean();
 
     const entries = shops.map((s) => urlEntry(
-      `${SITE_URL}/shop-detail.html?slug=${s.slug}`,
+      // Pretty URL (matches the /shop/:slug rewrite + api/shop-detail.js
+      // SSR function), not the legacy ?slug= query-string form — sitemap
+      // entries should always be the canonical URL you want indexed.
+      `${SITE_URL}/shop/${s.slug}`,
       new Date(s.updatedAt || Date.now()).toISOString(),
       'weekly',
       0.6
