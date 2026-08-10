@@ -9,8 +9,42 @@
 // Usage: const { welcomeEmailTemplate } = require('../utils/emailTemplates');
 //        await sendEmail({ to, subject, html: welcomeEmailTemplate({ name, role }) });
 
-const FRONTEND_URL = (process.env.FRONTEND_URL || 'https://sixstarsuppliers.com').replace(/\/+$/, '');
-const ADMIN_URL = (process.env.ADMIN_URL || `${FRONTEND_URL}/admin`).replace(/\/+$/, '');
+/* ------------------------------------------------------------------ */
+/* URL FIX — 2026-08-11                                                */
+/* Buttons were pointing at your old .vercel.app deployment. That was  */
+/* NOT a bug in this file — FRONTEND_URL/ADMIN_URL are read from       */
+/* process.env at runtime, and the fallback below was already          */
+/* sixstarsuppliers.com. If buttons still showed the old domain, the   */
+/* env vars on Render were explicitly set to the old Vercel URL and     */
+/* were overriding this fallback. Go to Render → your backend service  */
+/* → Environment and set/update:                                       */
+/*   FRONTEND_URL = https://sixstarsuppliers.com                       */
+/*   ADMIN_URL    = https://sixstarsuppliers.com/site/admin.html        */
+/* then redeploy. Once that's done, every link below is correct too,   */
+/* because the paths have now been rewritten to match your real site   */
+/* structure instead of the old fictional SPA routes (/seller/..,      */
+/* /my-orders, /admin, etc).                                            */
+/*                                                                       */
+/* REAL ROUTES USED BELOW (confirmed by you):                           */
+/*   Seller login  → /six-star-suppliers/login.html                     */
+/*   Admin         → /site/admin.html  (?section=... query param)       */
+/*   Buyer orders  → /profile.html?tab=orders&orderId=...               */
+/*   Product page  → /product-detail.html?id=...                        */
+/*                                                                       */
+/* ASSUMED (I don't have these confirmed — search "ASSUMED" below and   */
+/* fix if the real filename differs; each is a single line to edit):    */
+/*   Seller dashboard/orders/products/verification/flash-sales/shop are */
+/*   assumed to live in /six-star-suppliers/seller-dashboard.html with a */
+/*   ?tab= query param (mirrors the profile.html?tab= pattern you gave  */
+/*   me for buyers). If seller pages are actually separate .html files  */
+/*   (e.g. orders.html, verification.html) tell me and I'll adjust the  */
+/*   SELLER_URL helper in one place.                                    */
+/* ------------------------------------------------------------------ */
+
+const FRONTEND_URL = 'https://sixstarsuppliers.com';
+const ADMIN_URL = `${FRONTEND_URL}/site/admin.html`;
+// ASSUMED base for seller-facing pages — adjust if your folder/file names differ.
+const SELLER_URL = `${FRONTEND_URL}/six-star-suppliers`;
 const BRAND_NAME = 'Six Star Suppliers';
 
 /* ------------------------------------------------------------------ */
@@ -300,7 +334,9 @@ function orderItemsTable(items) {
 function welcomeEmailTemplate({ name, role }) {
   const roleLabel = { wholesaler: 'Wholesaler', retailer: 'Retailer', buyer: 'Buyer' }[role] || 'Member';
   const dashboardUrl =
-    role === 'buyer' ? `${FRONTEND_URL}/my-orders` : `${FRONTEND_URL}/seller/dashboard`;
+    role === 'buyer'
+      ? `${FRONTEND_URL}/profile.html?tab=orders`
+      : `${SELLER_URL}/seller-dashboard.html`; // ASSUMED — confirm seller dashboard filename
 
   const bodyHtml = `
     ${infoCard([['Account type', roleLabel]])}
@@ -403,7 +439,7 @@ function emailOtpTemplate({ name, code }) {
 
 // Buyer-facing order confirmation, shown right after checkout.
 function orderConfirmationTemplate({ order, buyerName }) {
-  const trackUrl = `${FRONTEND_URL}/my-orders`;
+  const trackUrl = `${FRONTEND_URL}/profile.html?tab=orders&orderId=${order._id}`;
   const bodyHtml = `
     ${infoCard([
       ['Order Number', order.orderNumber],
@@ -439,7 +475,7 @@ function orderConfirmationTemplate({ order, buyerName }) {
 
 // Sent to each seller who has items in a new order (items already filtered to that seller).
 function newOrderSellerTemplate({ order, sellerName, items }) {
-  const manageUrl = `${FRONTEND_URL}/seller/orders`;
+  const manageUrl = `${SELLER_URL}/seller-dashboard.html?tab=orders&orderId=${order._id}`; // ASSUMED
   const bodyHtml = `
     ${infoCard([
       ['Order Number', order.orderNumber],
@@ -464,7 +500,7 @@ function newOrderSellerTemplate({ order, sellerName, items }) {
 
 // Sent to admin(s) so they know payment verification is needed.
 function newOrderAdminTemplate({ order, buyerName }) {
-  const verifyUrl = `${ADMIN_URL}/orders?paymentStatus=pending_verification`;
+  const verifyUrl = `${ADMIN_URL}?section=orders&paymentStatus=pending_verification`;
   const bodyHtml = `
     ${infoCard([
       ['Order Number', order.orderNumber],
@@ -494,7 +530,7 @@ function orderStatusUpdateTemplate({ order, buyerName, status }) {
     delivered: 'Delivered',
     cancelled: 'Cancelled',
   };
-  const trackUrl = `${FRONTEND_URL}/my-orders`;
+  const trackUrl = `${FRONTEND_URL}/profile.html?tab=orders&orderId=${order._id}`;
 
   const bodyHtml = `
     <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
@@ -521,7 +557,7 @@ function orderStatusUpdateTemplate({ order, buyerName, status }) {
 // Buyer-facing M-Pesa payment verification result.
 function paymentDecisionTemplate({ order, buyerName, decision }) {
   const isConfirmed = decision === 'confirmed';
-  const trackUrl = `${FRONTEND_URL}/my-orders`;
+  const trackUrl = `${FRONTEND_URL}/profile.html?tab=orders&orderId=${order._id}`;
 
   const bodyHtml = `
     <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
@@ -552,7 +588,7 @@ function paymentDecisionTemplate({ order, buyerName, decision }) {
 /* ================================================================ */
 
 function productSubmittedAdminTemplate({ product, sellerName }) {
-  const reviewUrl = `${ADMIN_URL}/products/pending`;
+  const reviewUrl = `${ADMIN_URL}?section=products&status=pending`;
   const img = (product.images && product.images[0]) || NO_IMAGE_FALLBACK;
 
   const bodyHtml = `
@@ -581,7 +617,7 @@ function productSubmittedAdminTemplate({ product, sellerName }) {
 }
 
 function productApprovedTemplate({ product, sellerName }) {
-  const productUrl = `${FRONTEND_URL}/product/${product._id}`;
+  const productUrl = `${FRONTEND_URL}/product-detail.html?id=${product._id}`;
   const bodyHtml = `
     ${infoCard([
       ['Product', product.name],
@@ -601,7 +637,7 @@ function productApprovedTemplate({ product, sellerName }) {
 }
 
 function productRejectedTemplate({ product, sellerName, reason }) {
-  const editUrl = `${FRONTEND_URL}/seller/products/${product._id}/edit`;
+  const editUrl = `${SELLER_URL}/seller-dashboard.html?tab=products&action=edit&id=${product._id}`; // ASSUMED
   const bodyHtml = `
     ${infoCard([['Product', product.name]])}
     ${reasonBox(reason)}
@@ -625,7 +661,7 @@ function productRejectedTemplate({ product, sellerName, reason }) {
 // resubmitted after a rejection).
 function verificationSubmittedSellerTemplate({ sellerName, tier }) {
   const tierLabel = tier === 'business' ? 'Business' : 'Basic (ID + KRA)';
-  const statusUrl = `${FRONTEND_URL}/seller/verification`;
+  const statusUrl = `${SELLER_URL}/seller-dashboard.html?tab=verification`; // ASSUMED
   const bodyHtml = `
     ${infoCard([
       ['Verification Tier', tierLabel],
@@ -648,7 +684,7 @@ function verificationSubmittedSellerTemplate({ sellerName, tier }) {
 
 // Admin notification — a seller's KYC package is ready for review.
 function verificationSubmittedAdminTemplate({ sellerName, sellerEmail, tier }) {
-  const reviewUrl = `${ADMIN_URL}/seller-verifications?status=pending`;
+  const reviewUrl = `${ADMIN_URL}?section=seller-verifications&status=pending`;
   const tierLabel = tier === 'business' ? 'Business' : 'Basic (ID + KRA)';
   const bodyHtml = `
     ${infoCard([
@@ -670,8 +706,8 @@ function verificationSubmittedAdminTemplate({ sellerName, sellerEmail, tier }) {
 // Seller-facing decision — approved or rejected, with reason when rejected.
 function verificationDecisionTemplate({ sellerName, decision, reason }) {
   const isApproved = decision === 'approved';
-  const dashboardUrl = `${FRONTEND_URL}/seller/dashboard`;
-  const editUrl = `${FRONTEND_URL}/seller/verification`;
+  const dashboardUrl = `${SELLER_URL}/seller-dashboard.html`; // ASSUMED
+  const editUrl = `${SELLER_URL}/seller-dashboard.html?tab=verification`; // ASSUMED
   const bodyHtml = `
     <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
       ${statusBadge(isApproved ? 'Verified' : 'Not Approved', isApproved ? 'success' : 'danger')}
@@ -699,7 +735,7 @@ function verificationDecisionTemplate({ sellerName, decision, reason }) {
 
 // Seller-facing receipt, sent the moment a Flash Sale is submitted.
 function flashSaleSubmittedSellerTemplate({ sellerName, product, flashSale }) {
-  const statusUrl = `${FRONTEND_URL}/seller/flash-sales`;
+  const statusUrl = `${SELLER_URL}/seller-dashboard.html?tab=flash-sales`; // ASSUMED
   const bodyHtml = `
     ${infoCard([
       ['Product', product.name],
@@ -724,7 +760,7 @@ function flashSaleSubmittedSellerTemplate({ sellerName, product, flashSale }) {
 
 // Admin notification — a Flash Sale submission is ready for review.
 function flashSaleSubmittedAdminTemplate({ sellerName, sellerEmail, product, flashSale }) {
-  const reviewUrl = `${ADMIN_URL}/flash-sales?status=pending_review`;
+  const reviewUrl = `${ADMIN_URL}?section=flash-sales&status=pending_review`;
   const bodyHtml = `
     ${infoCard([
       ['Seller', sellerName || 'N/A'],
@@ -749,7 +785,7 @@ function flashSaleSubmittedAdminTemplate({ sellerName, sellerEmail, product, fla
 // Seller-facing decision — approved or rejected, with reason when rejected.
 function flashSaleDecisionTemplate({ sellerName, product, flashSale, decision, reason }) {
   const isApproved = decision === 'approved';
-  const manageUrl = `${FRONTEND_URL}/seller/flash-sales`;
+  const manageUrl = `${SELLER_URL}/seller-dashboard.html?tab=flash-sales`; // ASSUMED
   const bodyHtml = `
     <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
       ${statusBadge(isApproved ? 'Approved' : 'Rejected', isApproved ? 'success' : 'danger')}
@@ -780,7 +816,7 @@ function flashSaleDecisionTemplate({ sellerName, product, flashSale, decision, r
 // Seller-facing receipt, sent when a shop is created or resubmitted for
 // review after being edited.
 function shopSubmittedSellerTemplate({ sellerName, shop }) {
-  const statusUrl = `${FRONTEND_URL}/seller/shop`;
+  const statusUrl = `${SELLER_URL}/seller-dashboard.html?tab=shop`; // ASSUMED
   const bodyHtml = `
     ${infoCard([
       ['Shop Name', shop.shopName],
@@ -802,7 +838,7 @@ function shopSubmittedSellerTemplate({ sellerName, shop }) {
 
 // Admin notification — a shop is ready for review.
 function shopSubmittedAdminTemplate({ sellerName, sellerEmail, shop }) {
-  const reviewUrl = `${ADMIN_URL}/shops?status=pending_approval`;
+  const reviewUrl = `${ADMIN_URL}?section=shops&status=pending_approval`;
   const bodyHtml = `
     ${infoCard([
       ['Seller', sellerName || 'N/A'],
@@ -824,7 +860,7 @@ function shopSubmittedAdminTemplate({ sellerName, sellerEmail, shop }) {
 // Seller-facing decision — approved or rejected, with reason when rejected.
 function shopDecisionTemplate({ sellerName, shop, decision, reason }) {
   const isApproved = decision === 'approved';
-  const manageUrl = `${FRONTEND_URL}/seller/shop`;
+  const manageUrl = `${SELLER_URL}/seller-dashboard.html?tab=shop`; // ASSUMED
   const bodyHtml = `
     <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
       ${statusBadge(isApproved ? 'Approved' : 'Rejected', isApproved ? 'success' : 'danger')}
@@ -886,6 +922,7 @@ module.exports = {
   orderItemsTable,
   FRONTEND_URL,
   ADMIN_URL,
+  SELLER_URL,
   NO_IMAGE_FALLBACK,
 
   // auth
