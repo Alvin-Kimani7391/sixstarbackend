@@ -122,6 +122,15 @@ const createOrder = asyncHandler(async (req, res) => {
         );
       }
 
+      // Belt-and-braces: the Flash Sale allocation is drawn from the product's
+      // real stock, so it can never sell more than the product actually has on
+      // hand right now (covers cases where stock dropped after allocation, e.g.
+      // a manual admin adjustment or a race with another order).
+      if (product.stock < quantity) {
+        res.status(400);
+        throw new Error(`Insufficient stock for "${product.name}"`);
+      }
+
       // Flash Sale items are treated as standard (retail-style) delivery,
       // regardless of the underlying seller's usual wholesale terms — the
       // Flash Sale model doesn't carry its own delivery-charge config.
@@ -247,10 +256,9 @@ const createOrder = asyncHandler(async (req, res) => {
 
   for (const { product, variantDoc, quantity, flashSale } of prepared) {
     if (flashSale) {
-      // Flash Sale stock is its own pool — never touches the product's
-      // regular stock counter. Deplete it and flip to sold_out the instant
-      // it runs dry, same as recordFlashSaleSale() does, but against the
-      // exact FlashSale doc we already validated above (avoids re-querying
+      // Flash Sale stock is its own pool — deplete it and flip to sold_out the
+      // instant it runs dry, same as recordFlashSaleSale() does, but against
+      // the exact FlashSale doc we already validated above (avoids re-querying
       // "the active one for this product", which matters if a product ever
       // has more than one historical Flash Sale entry).
       const updated = await FlashSale.findByIdAndUpdate(
@@ -262,7 +270,18 @@ const createOrder = asyncHandler(async (req, res) => {
         updated.status = 'sold_out';
         await updated.save();
       }
-      continue; // no regular Product.stock decrement for Flash Sale lines
+
+      // FIX: Flash Sale units are still real inventory drawn from the same
+      // product — this used to skip the Product.stock decrement entirely
+      // ("continue" below, with no decrement), which meant a buyer could keep
+      // purchasing the product at its regular price/listing for the full
+      // original stock count on top of whatever sold via the Flash Sale, and
+      // seller/admin dashboards (which read Product.stock, not FlashSale.stockSold)
+      // never reflected Flash Sale sales at all. Keep it in sync, same as a
+      // normal line. (Flash Sale items don't support variants yet, so no
+      // variant-level decrement here.)
+      await Product.findByIdAndUpdate(product._id, { $inc: { stock: -quantity } });
+      continue; // no separate variant stock decrement for Flash Sale lines
     }
 
     if (variantDoc) {
@@ -521,10 +540,38 @@ const cancelOrder = asyncHandler(async (req, res) => {
   // Restore stock — both the aggregate product stock and, if this line had a
   // variant, that variant's own stock (previously only product.stock was restored,
   // which would have silently drifted the variant totals out of sync).
+  //
+  // FIX: Flash Sale lines now also release their FlashSale.stockSold allocation.
+  // Previously a Flash Sale purchase never decremented Product.stock (see the
+  // createOrder fix above) but this loop unconditionally restored it anyway —
+  // meaning cancelling a Flash Sale order used to ADD phantom stock that was
+  // never actually subtracted, AND left the Flash Sale's stockSold permanently
+  // "used up" (possibly stuck at sold_out) even though the units were never
+  // delivered. Now that Product.stock is correctly decremented on purchase,
+  // restoring it here is correct — and we also give the FlashSale its
+  // allocation back so those units are buyable again.
   for (const item of order.items) {
     await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } });
     if (item.variant) {
       await ProductVariant.findByIdAndUpdate(item.variant, { $inc: { stock: item.quantity } });
+    }
+
+    if (item.isFlashDeal && item.flashSale) {
+      const restored = await FlashSale.findByIdAndUpdate(
+        item.flashSale,
+        { $inc: { stockSold: -item.quantity } },
+        { new: true }
+      );
+      // If releasing this allocation pulls it back under capacity, and the
+      // scheduler had already marked it 'sold_out', flip it back to whatever
+      // its time-based status should actually be right now so it becomes
+      // buyable again instead of staying stuck at sold_out.
+      if (restored && restored.status === 'sold_out' && restored.stockSold < restored.stockAllocated) {
+        const now = new Date();
+        restored.status =
+          restored.endAt < now ? 'ended' : restored.startAt <= now ? 'active' : 'scheduled';
+        await restored.save();
+      }
     }
   }
 
