@@ -72,7 +72,13 @@ app.use('/api/seller-verification', require('./routes/sellerVerificationRoutes')
 app.use('/api/seller-profile', require('./routes/sellerProfileRoutes'));
 app.use('/api/flash-sales', require('./routes/flashSaleRoutes'));
 app.use('/', require('./routes/seoRoutes'));
-app.use('/', require('./routes/merchantFeed.route'));
+
+const merchantFeedRouter = require('./routes/merchantFeed.route');
+
+console.log('MERCHANT FEED EXPORT:', merchantFeedRouter);
+console.log('MERCHANT FEED TYPE:', typeof merchantFeedRouter);
+
+app.use('/', merchantFeedRouter);
 
 app.set('trust proxy', 1);
 app.use('/api/legal-documents', require('./routes/legalDocumentRoutes'));
