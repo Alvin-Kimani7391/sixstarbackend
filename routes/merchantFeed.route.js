@@ -79,7 +79,10 @@ function itemXml(product) {
   const additionalImages = images.slice(1, 1 + MAX_ADDITIONAL_IMAGES);
 
   const stock = Number(product.stock) || 0;
-  const availability = stock > 0 ? 'in stock' : 'out of stock';
+  const availability =
+  safeStock > 0
+    ? 'in_stock'
+    : 'out_of_stock';
 
   const finalPrice = Number(product.finalPrice) || 0;
   const discountPercent = Number(product.discountPercent) || 0;
@@ -122,11 +125,11 @@ router.get('/merchant-feed.xml', async (req, res) => {
 
     const items = products.map(itemXml).filter(Boolean).join('\n');
 
- const body = `<?xml version="1.0" encoding="UTF-8"?>
+    const body = `<?xml version="1.0" encoding="UTF-8"?>
 <rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
 <channel>
   <title>Six Star Suppliers Product Feed</title>
-  <link>${xmlEscape(SITE_URL)}</link>
+  <link>${SITE_URL}</link>
   <description>Live product feed for Six Star Suppliers, generated from the current catalog.</description>
   ${items}
 </channel>
