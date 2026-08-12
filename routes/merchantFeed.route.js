@@ -79,10 +79,7 @@ function itemXml(product) {
   const additionalImages = images.slice(1, 1 + MAX_ADDITIONAL_IMAGES);
 
   const stock = Number(product.stock) || 0;
-  const availability =
-  safeStock > 0
-    ? 'in_stock'
-    : 'out_of_stock';
+  const availability = stock > 0 ? 'in stock' : 'out of stock';
 
   const finalPrice = Number(product.finalPrice) || 0;
   const discountPercent = Number(product.discountPercent) || 0;
