@@ -27,6 +27,7 @@ const allowedOrigins = [
   'http://localhost:5500',
   'http://127.0.0.1:5500',
   'http://www.sixstarsuppliers.com',
+  'https://www.sixstarsuppliers.com',
   'https://sixstarsuppliers.com',
   process.env.CLIENT_URL,
 ].filter(Boolean);

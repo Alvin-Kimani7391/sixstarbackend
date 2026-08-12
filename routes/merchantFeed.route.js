@@ -122,11 +122,11 @@ router.get('/merchant-feed.xml', async (req, res) => {
 
     const items = products.map(itemXml).filter(Boolean).join('\n');
 
-    const body = `<?xml version="1.0" encoding="UTF-8"?>
+ const body = `<?xml version="1.0" encoding="UTF-8"?>
 <rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
 <channel>
   <title>Six Star Suppliers Product Feed</title>
-  <link>${SITE_URL}</link>
+  <link>${xmlEscape(SITE_URL)}</link>
   <description>Live product feed for Six Star Suppliers, generated from the current catalog.</description>
   ${items}
 </channel>
