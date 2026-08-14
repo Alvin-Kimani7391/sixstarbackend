@@ -7,6 +7,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const morgan = require('morgan');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
+const { startRFQScheduler } = require('./utils/rfqScheduler');
 
 dotenv.config();
 
@@ -72,6 +73,7 @@ app.use('/api/shop-reviews', require('./routes/shopReviewRoutes'));
 app.use('/api/seller-verification', require('./routes/sellerVerificationRoutes'));
 app.use('/api/seller-profile', require('./routes/sellerProfileRoutes'));
 app.use('/api/flash-sales', require('./routes/flashSaleRoutes'));
+app.use('/api/rfq', require('./routes/rfqRoutes')); // NEW — RFQ / Bidding / Private Chat
 app.use('/', require('./routes/seoRoutes'));
 
 const merchantFeedRouter = require('./routes/merchantFeed.route');
@@ -100,6 +102,7 @@ mongoose
     app.listen(PORT, () => {
       console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
     });
+    startRFQScheduler(); // NEW — expires overdue RFQs, sends deadline reminders
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err.message);

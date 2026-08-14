@@ -118,10 +118,54 @@ const uploadLegalDoc = multer({
 
 const uploadLegalDocument = uploadLegalDoc.single('file');
 
+// ---------------------------------------------------------------------------
+// RFQ product photo: ONE image, attached when a buyer creates a Request for
+// Quote (report section 2 — "product image"). Separate folder so these
+// don't mix with actual marketplace product photos.
+// ---------------------------------------------------------------------------
+const rfqStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'six-star-suppliers/rfq',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 1200, height: 1200, crop: 'limit' }],
+  },
+});
+
+const uploadRFQ = multer({
+  storage: rfqStorage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+});
+
+const uploadRFQImage = uploadRFQ.single('productImage');
+
+// ---------------------------------------------------------------------------
+// RFQ chat image attachments: sent inline in the private buyer<->seller
+// conversation on an RFQ. Kept smaller (3MB) and in its own folder since
+// these are casual in-chat photos, not storefront-quality product shots.
+// ---------------------------------------------------------------------------
+const rfqChatStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'six-star-suppliers/rfq-chat',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 1000, height: 1000, crop: 'limit' }],
+  },
+});
+
+const uploadRFQChat = multer({
+  storage: rfqChatStorage,
+  limits: { fileSize: 3 * 1024 * 1024 }, // 3MB
+});
+
+const uploadRFQChatImage = uploadRFQChat.single('image');
+
 module.exports = {
   uploadProductImages,
   uploadSingleImage,
   uploadShopImages,
   uploadVerificationDocs,
   uploadLegalDocument,
+  uploadRFQImage,
+  uploadRFQChatImage,
 };

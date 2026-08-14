@@ -70,6 +70,17 @@ const userSchema = new Schema(
     // ---------- Login lockout (brute-force protection) ----------
     failedLoginAttempts: { type: Number, default: 0, select: false },
     lockUntil: { type: Date, select: false },
+
+    // ---------- RFQ chat moderation (NEW) ----------
+    // Graduated response to off-platform-contact-sharing attempts in RFQ
+    // chat — see utils/rfqModeration.js. Counts up every time a message
+    // from this user trips the contact-info filter, across ALL of their
+    // RFQ conversations (not per-conversation), because the risk being
+    // managed is this user's behaviour pattern, not any single thread.
+    contactShareWarnings: { type: Number, default: 0, select: false },
+    messagingRestricted: { type: Boolean, default: false }, // true = RFQ chat/bids blocked pending admin review
+    messagingRestrictedAt: { type: Date, select: false },
+    flaggedForReview: { type: Boolean, default: false, select: false }, // repeat-offender flag for admin dashboard
   },
   baseOptions
 );
