@@ -163,6 +163,28 @@ const getRFQDetail = asyncHandler(async (req, res) => {
   res.json({ success: true, rfq: rfq.toPublicJSON() });
 });
 
+// @desc    Masked buyer identity for a seller who has already bid on this
+//          RFQ — this is how the seller's chat UI learns WHO to message.
+//          Only the same masked shape (label/initials/verified/location)
+//          ever leaves the server; real name/email/phone never do.
+// @route   GET /api/rfq/:rfqId/buyer-identity
+// @access  Private (seller who has a bid on this RFQ)
+const getBuyerIdentityForSeller = asyncHandler(async (req, res) => {
+  const rfq = await RFQRequest.findById(req.params.rfqId).populate('buyer', 'name isVerified');
+  if (!rfq) {
+    res.status(404);
+    throw new Error('Request not found');
+  }
+
+  const hasBid = await RFQBid.exists({ rfq: rfq._id, seller: req.user._id });
+  if (!hasBid) {
+    res.status(403);
+    throw new Error('Submit an offer on this request before messaging the buyer');
+  }
+
+  res.json({ success: true, buyer: maskIdentity(rfq.buyer, 'buyer') });
+});
+
 // @desc    Buyer's own RFQs (full detail, including their own view)
 // @route   GET /api/rfq/mine
 // @access  Private (buyer)
@@ -194,10 +216,7 @@ const getSimilarProducts = asyncHandler(async (req, res) => {
   res.json({ success: true, count: products.length, products });
 });
 
-// @desc    Buyer selects the winning seller for their RFQ. Delegated to
-//          rfqBidController.acceptBid for the actual bid-status transition
-//          — this endpoint exists as a convenience alias some frontends
-//          may prefer (POST /api/rfq/:id/select-seller with a bidId body).
+// @desc    Buyer closes their RFQ once the transaction is done.
 // @route   PATCH /api/rfq/:id/close
 // @access  Private (buyer, owner only)
 const closeRFQ = asyncHandler(async (req, res) => {
@@ -221,7 +240,6 @@ const closeRFQ = asyncHandler(async (req, res) => {
 
   res.json({ success: true, message: 'Request closed', rfq });
 
-  // Notify buyer + selected seller (if any) that the RFQ has closed.
   const buyer = await User.findById(rfq.buyer).select('name email');
   if (buyer?.email) {
     safeSendEmail(
@@ -417,6 +435,7 @@ module.exports = {
   createRFQ,
   getPublicRFQs,
   getRFQDetail,
+  getBuyerIdentityForSeller,
   getMyRFQs,
   getSimilarProducts,
   closeRFQ,
