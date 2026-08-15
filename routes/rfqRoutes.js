@@ -15,6 +15,7 @@ const {
   getPublicRFQs,
   getRFQDetail,
   getMyRFQs,
+  getBuyerIdentityForSeller,   // NEW — was defined/exported but never wired
   getSimilarProducts,
   closeRFQ,
   cancelRFQ,
@@ -48,6 +49,7 @@ router.get('/:id', getRFQDetail);
 // ------------------------------------------------------------------
 router.get('/profile/activity', protect, getMyRFQActivity);
 
+
 // ------------------------------------------------------------------
 // Buyer
 // ------------------------------------------------------------------
@@ -64,7 +66,8 @@ router.patch('/bids/:bidId/accept', protect, authorize('buyer'), acceptBid);
 router.post('/:rfqId/bids', protect, authorize('wholesaler', 'retailer'), submitOrUpdateBid);
 router.patch('/bids/:bidId/withdraw', protect, authorize('wholesaler', 'retailer'), withdrawBid);
 router.get('/bids/mine/list', protect, authorize('wholesaler', 'retailer'), getMyBids);
-
+// NEW — masked buyer identity, only unlocked once this seller has a bid on the RFQ
+router.get('/:rfqId/buyer-identity', protect, authorize('wholesaler', 'retailer'), getBuyerIdentityForSeller);
 // ------------------------------------------------------------------
 // Chat — shared by buyer & seller, access is validated inside the
 // controller (must be the RFQ's buyer, or a seller who has bid on it)
