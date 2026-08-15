@@ -16,11 +16,11 @@
 
 const PATTERNS = [
   {
-    flag: 'phone_number',
-    // Kenyan mobile formats (07xx / 01xx / +254 7xx / 254 7xx) with or
-    // without spaces/dashes, plus a generic international fallback.
-    regex: /(?:\+?254|0)\s?[71]\d{1}[\s-]?\d{3}[\s-]?\d{3}\b|\b\d{3}[\s-]\d{3}[\s-]\d{3,4}\b|\+\d{7,14}\b/g,
-  },
+  flag: 'phone_number',
+  // Kenyan mobile formats: 07xxxxxxxx, 01xxxxxxxx, +2547xxxxxxxx, 2547xxxxxxxx
+  // with or without spaces/dashes, plus international fallback
+  regex: /(?:\+?254|0)\s?(?:[71]\d{8}|[71]\d{1}[\s-]?\d{3}[\s-]?\d{4})\b|\b\d{3}[\s-]\d{3}[\s-]\d{4}\b|\+\d{7,14}\b/g,
+},
   {
     flag: 'email_address',
     regex: /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g,
