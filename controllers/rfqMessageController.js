@@ -193,7 +193,26 @@ const getConversation = asyncHandler(async (req, res) => {
   });
 });
 
+/* ================================================================ */
+/* ADMIN                                                              */
+/* ================================================================ */
+
+// @desc    Admin: get every message across every buyer<->seller thread on
+//          an RFQ, unmasked, oldest first — used by the moderation modal's
+//          thread picker.
+// @route   GET /api/rfq/admin/:id/messages
+// @access  Private (admin)
+const adminGetRFQMessages = asyncHandler(async (req, res) => {
+  const messages = await RFQMessage.find({ rfq: req.params.id })
+    .populate('sender', 'name email role')
+    .populate('receiver', 'name email role')
+    .sort('createdAt');
+
+  res.json({ success: true, count: messages.length, messages });
+});
+
 module.exports = {
   sendMessage,
   getConversation,
+  adminGetRFQMessages,
 };

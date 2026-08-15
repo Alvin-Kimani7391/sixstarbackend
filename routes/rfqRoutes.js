@@ -15,7 +15,7 @@ const {
   getPublicRFQs,
   getRFQDetail,
   getMyRFQs,
-  getBuyerIdentityForSeller,   // NEW — was defined/exported but never wired
+  getBuyerIdentityForSeller,
   getSimilarProducts,
   closeRFQ,
   cancelRFQ,
@@ -33,9 +33,14 @@ const {
   getMyBids,
   getBuyerOffers,
   acceptBid,
+  adminGetRFQBids,
 } = require('../controllers/rfqBidController');
 
-const { sendMessage, getConversation } = require('../controllers/rfqMessageController');
+const {
+  sendMessage,
+  getConversation,
+  adminGetRFQMessages,
+} = require('../controllers/rfqMessageController');
 
 // ------------------------------------------------------------------
 // Public
@@ -66,8 +71,9 @@ router.patch('/bids/:bidId/accept', protect, authorize('buyer'), acceptBid);
 router.post('/:rfqId/bids', protect, authorize('wholesaler', 'retailer'), submitOrUpdateBid);
 router.patch('/bids/:bidId/withdraw', protect, authorize('wholesaler', 'retailer'), withdrawBid);
 router.get('/bids/mine/list', protect, authorize('wholesaler', 'retailer'), getMyBids);
-// NEW — masked buyer identity, only unlocked once this seller has a bid on the RFQ
+// Masked buyer identity, only unlocked once this seller has a bid on the RFQ
 router.get('/:rfqId/buyer-identity', protect, authorize('wholesaler', 'retailer'), getBuyerIdentityForSeller);
+
 // ------------------------------------------------------------------
 // Chat — shared by buyer & seller, access is validated inside the
 // controller (must be the RFQ's buyer, or a seller who has bid on it)
@@ -79,6 +85,8 @@ router.get('/:rfqId/messages/:counterpartId', protect, getConversation);
 // Admin monitoring (report section 16/17)
 // ------------------------------------------------------------------
 router.get('/admin/all', protect, authorize('admin'), adminGetAllRFQs);
+router.get('/admin/:id/bids', protect, authorize('admin'), adminGetRFQBids);
+router.get('/admin/:id/messages', protect, authorize('admin'), adminGetRFQMessages);
 router.patch('/admin/:id/suspend', protect, authorize('admin'), adminSuspendRFQ);
 router.delete('/admin/:id', protect, authorize('admin'), adminDeleteRFQ);
 router.get('/admin/flagged-users', protect, authorize('admin'), adminGetFlaggedUsers);

@@ -267,10 +267,27 @@ const acceptBid = asyncHandler(async (req, res) => {
   }
 });
 
+/* ================================================================ */
+/* ADMIN                                                              */
+/* ================================================================ */
+
+// @desc    Admin: get every bid on an RFQ, any status, with full
+//          (unmasked) seller identity — used by the moderation modal.
+// @route   GET /api/rfq/admin/:id/bids
+// @access  Private (admin)
+const adminGetRFQBids = asyncHandler(async (req, res) => {
+  const bids = await RFQBid.find({ rfq: req.params.id })
+    .populate('seller', 'name email businessName shopName role')
+    .sort('-createdAt');
+
+  res.json({ success: true, count: bids.length, bids });
+});
+
 module.exports = {
   submitOrUpdateBid,
   withdrawBid,
   getMyBids,
   getBuyerOffers,
   acceptBid,
+  adminGetRFQBids,
 };
