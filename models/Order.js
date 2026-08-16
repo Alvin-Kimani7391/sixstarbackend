@@ -26,7 +26,28 @@ const orderItemSchema = new Schema(
     // drifts even if the seller later edits their product's sellerPrice.
     sellerPriceAtPurchase: { type: Number, required: true },
 
-// --- Flash Sale attribution ---
+    // --- Marketplace commission snapshot ---
+    // Resolved from the item's category commission chain (own rate on the
+    // category, or inherited from the nearest ancestor category, or the
+    // platform default — see resolveCategoryCommissionRate() in
+    // categoryController.js) at the EXACT MOMENT the order was placed, and
+    // computed off priceAtPurchase (the buyer-facing price actually paid),
+    // not sellerPriceAtPurchase. These are snapshots, not live lookups —
+    // changing a category's commission rate later never rewrites past
+    // orders, exactly like sellerPriceAtPurchase above.
+    //
+    //   commissionRate   — percentage applied, e.g. 12 means 12% (for the
+    //                       whole line, i.e. already reflects quantity in
+    //                       how it was derived, but is itself just the %)
+    //   commissionAmount — KSh the marketplace keeps on this line (unit
+    //                       commission x quantity)
+    //   sellerPayout     — KSh the seller nets on this line
+    //                       (priceAtPurchase x quantity - commissionAmount)
+    commissionRate: { type: Number, default: 0 },
+    commissionAmount: { type: Number, default: 0 },
+    sellerPayout: { type: Number, default: 0 },
+
+    // --- Flash Sale attribution ---
     // When this line was bought during an active Flash Sale, isFlashDeal is
     // true and flashSale points at the specific FlashSale document whose
     // price/stock pool the purchase drew from. priceAtPurchase above is
@@ -119,5 +140,20 @@ orderSchema.pre('save', async function (next) {
   }
   next();
 });
+
+// Virtual: total marketplace commission across every line in this order —
+// handy for the admin order list/detail without having to re-sum items
+// client-side every time.
+orderSchema.virtual('totalCommission').get(function () {
+  return (this.items || []).reduce((sum, i) => sum + (i.commissionAmount || 0), 0);
+});
+
+// Virtual: total seller payout across every line in this order.
+orderSchema.virtual('totalSellerPayout').get(function () {
+  return (this.items || []).reduce((sum, i) => sum + (i.sellerPayout || 0), 0);
+});
+
+orderSchema.set('toJSON', { virtuals: true });
+orderSchema.set('toObject', { virtuals: true });
 
 module.exports = mongoose.model('Order', orderSchema);

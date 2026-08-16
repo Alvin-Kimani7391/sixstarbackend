@@ -4,6 +4,54 @@ const Product = require('../models/Product');
 
 const MAX_LEVEL = 2; // 0 = Parent Category, 1 = Category, 2 = Sub Category
 
+// ---------------------------------------------------------------------------
+// MARKETPLACE COMMISSION
+// ---------------------------------------------------------------------------
+// Platform-wide fallback used only when NEITHER a category nor any of its
+// ancestors has an explicit commissionRate set. Override via the
+// DEFAULT_COMMISSION_RATE env var if you want to change this without a
+// redeploy — it is read fresh on every call, not cached.
+const getDefaultCommissionRate = () => {
+  const fromEnv = Number(process.env.DEFAULT_COMMISSION_RATE);
+  return Number.isFinite(fromEnv) ? fromEnv : 10;
+};
+
+// Walks a category up through its parentCategory chain until it finds one
+// with commissionRate explicitly set (not null/undefined), and returns that
+// rate. If nothing in the chain has one, falls back to the platform default.
+//
+// Returns: { rate, source, sourceName }
+//   - rate: the effective percentage (number, e.g. 12)
+//   - source: the ObjectId of the category whose own rate applied, or the
+//     string 'default' if the platform default was used
+//   - sourceName: a human-readable label for that source, for admin/seller UI
+//
+// Accepts either a category id (string/ObjectId) or an already-loaded
+// category document (as long as it has _id/commissionRate/parentCategory).
+const resolveCategoryCommissionRate = async (categoryIdOrDoc) => {
+  let current =
+    categoryIdOrDoc && categoryIdOrDoc.commissionRate !== undefined && categoryIdOrDoc._id
+      ? categoryIdOrDoc
+      : await Category.findById(categoryIdOrDoc).select('commissionRate parentCategory name');
+
+  const visited = new Set(); // guards against any accidental cycles in the data
+  while (current) {
+    const idStr = String(current._id);
+    if (visited.has(idStr)) break;
+    visited.add(idStr);
+
+    if (current.commissionRate !== null && current.commissionRate !== undefined) {
+      return { rate: current.commissionRate, source: current._id, sourceName: current.name };
+    }
+
+    current = current.parentCategory
+      ? await Category.findById(current.parentCategory).select('commissionRate parentCategory name')
+      : null;
+  }
+
+  return { rate: getDefaultCommissionRate(), source: 'default', sourceName: 'Platform default' };
+};
+
 // @desc    Get all active categories (flat list — for navbar, filters, product creation form)
 // @route   GET /api/categories
 // @access  Public
@@ -88,11 +136,28 @@ const cascadeLevelUpdate = async (categoryId, newLevel) => {
   );
 };
 
+// Parses/validates a raw commissionRate value coming from the request body.
+// Accepts: undefined (means "field wasn't sent, leave alone" — caller checks
+// this separately), '' or 'null' (means "clear it, go back to inheriting"),
+// or a numeric string/number between 0 and 100.
+// Returns null to mean "clear it", or a validated number.
+// Throws an Error with .status = 400 on anything invalid.
+const parseCommissionRateInput = (raw) => {
+  if (raw === '' || raw === 'null' || raw === null) return null;
+  const parsed = Number(raw);
+  if (Number.isNaN(parsed) || parsed < 0 || parsed > 100) {
+    const err = new Error('Commission rate must be a number between 0 and 100');
+    err.status = 400;
+    throw err;
+  }
+  return parsed;
+};
+
 // @desc    Admin creates a category (optionally nested under a parent)
 // @route   POST /api/categories
 // @access  Private (admin)
 const createCategory = asyncHandler(async (req, res) => {
-  const { name, parentCategory } = req.body;
+  const { name, parentCategory, commissionRate } = req.body;
   if (!name) {
     res.status(400);
     throw new Error('Category name is required');
@@ -117,12 +182,23 @@ const createCategory = asyncHandler(async (req, res) => {
   const slug = name.toLowerCase().trim().replace(/\s+/g, '-');
   const image = req.file ? req.file.path : '';
 
+  let parsedCommission = null;
+  if (commissionRate !== undefined) {
+    try {
+      parsedCommission = parseCommissionRateInput(commissionRate);
+    } catch (err) {
+      res.status(err.status || 400);
+      throw err;
+    }
+  }
+
   const category = await Category.create({
     name,
     slug,
     image,
     parentCategory: parentCategory || null,
     level,
+    commissionRate: parsedCommission,
   });
   res.status(201).json({ success: true, category });
 });
@@ -143,6 +219,18 @@ const updateCategory = asyncHandler(async (req, res) => {
   }
   if (req.file) category.image = req.file.path;
   if (req.body.isActive !== undefined) category.isActive = req.body.isActive;
+
+  // Marketplace commission — applied here so it's picked up regardless of
+  // whether this request also happens to move the category under a new
+  // parent (that branch returns early further down).
+  if (req.body.commissionRate !== undefined) {
+    try {
+      category.commissionRate = parseCommissionRateInput(req.body.commissionRate);
+    } catch (err) {
+      res.status(err.status || 400);
+      throw err;
+    }
+  }
 
   if (req.body.parentCategory !== undefined) {
     const newParentId = req.body.parentCategory || null;
@@ -221,6 +309,30 @@ const deleteCategory = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Category removed' });
 });
 
+// @desc    Resolve the EFFECTIVE marketplace commission rate for a category —
+//          its own rate if set, otherwise inherited from the nearest ancestor
+//          that has one, otherwise the platform default. This is what powers
+//          the "Marketplace commission for this category: X%" notice sellers
+//          see while creating a product, and what the admin category form
+//          shows as the live preview when a rate field is left blank.
+// @route   GET /api/categories/:id/commission
+// @access  Public (sellers need this while picking a category on the product form)
+const getCategoryCommission = asyncHandler(async (req, res) => {
+  const category = await Category.findById(req.params.id).select('_id');
+  if (!category) {
+    res.status(404);
+    throw new Error('Category not found');
+  }
+  const { rate, source, sourceName } = await resolveCategoryCommissionRate(req.params.id);
+  res.json({
+    success: true,
+    commissionRate: rate,
+    inherited: source !== String(req.params.id),
+    source,
+    sourceName,
+  });
+});
+
 module.exports = {
   getCategories,
   getAllCategoriesAdmin,
@@ -229,4 +341,7 @@ module.exports = {
   createCategory,
   updateCategory,
   deleteCategory,
+  getCategoryCommission,
+  resolveCategoryCommissionRate, // used by orderController.js to snapshot commission per order line
+  getDefaultCommissionRate,
 };

@@ -14,6 +14,7 @@ const {
   orderStatusUpdateTemplate,
 } = require('../utils/emailTemplates');
 const { getCategoryAttributeDefs } = require('./categoryAttributeController');
+const { resolveCategoryCommissionRate } = require('./categoryController');
 
 // Mirrors SS_CART.resolveUnitPrice on the frontend, but this is the copy that
 // actually decides what gets charged — the client-side one is just a preview.
@@ -56,6 +57,19 @@ function isNegotiatedDelivery(product) {
   );
 }
 
+// Resolves the marketplace commission for a single unit at the given unit
+// price, using the product's category commission chain (own rate, inherited
+// from an ancestor category, or the platform default). Returns per-unit
+// figures — callers multiply by quantity themselves so rounding happens
+// consistently against the line total rather than accumulating per-unit
+// rounding error across large quantities.
+async function resolveLineCommission(categoryId, unitPrice) {
+  const { rate } = await resolveCategoryCommissionRate(categoryId);
+  const commissionAmountPerUnit = Math.round(unitPrice * (rate / 100));
+  const sellerPayoutPerUnit = unitPrice - commissionAmountPerUnit;
+  return { rate, commissionAmountPerUnit, sellerPayoutPerUnit };
+}
+
 // @desc    Buyer places an order and pastes their M-Pesa confirmation message
 // @route   POST /api/orders
 // @access  Private (buyer)
@@ -80,7 +94,7 @@ const createOrder = asyncHandler(async (req, res) => {
   let hasRetailItem = false;
   let hasNegotiatedItem = false;
   const deliveryNotes = [];
-  const prepared = []; // { product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee, flashSale? }
+  const prepared = []; // { product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee, flashSale?, commissionRate, commissionAmountUnit, sellerPayoutUnit }
 
   for (const reqItem of items) {
     const product = await Product.findOne({ _id: reqItem.productId, status: 'active', isActive: true });
@@ -139,6 +153,12 @@ const createOrder = asyncHandler(async (req, res) => {
       const unitPrice = flashSale.flashSalePrice;
       itemsTotal += unitPrice * quantity;
 
+      // Marketplace commission still applies to Flash Sale lines, resolved off
+      // the product's own category exactly like a normal line — the discount
+      // just means it's computed against the lower Flash Sale price.
+      const { rate: fsCommissionRate, commissionAmountPerUnit: fsCommissionAmountUnit, sellerPayoutPerUnit: fsSellerPayoutUnit } =
+        await resolveLineCommission(product.category, unitPrice);
+
       prepared.push({
         product,
         variantDoc: null,
@@ -147,6 +167,9 @@ const createOrder = asyncHandler(async (req, res) => {
         sellerUnitPrice: unitPrice, // no separate admin markup modeled for Flash Sale pricing
         deliveryFee: 0,
         flashSale,
+        commissionRate: fsCommissionRate,
+        commissionAmountUnit: fsCommissionAmountUnit,
+        sellerPayoutUnit: fsSellerPayoutUnit,
       });
 
       continue; // skip all the regular-product pricing/variant/stock logic below
@@ -217,7 +240,23 @@ const createOrder = asyncHandler(async (req, res) => {
     wholesaleDeliveryTotal += fee;
     if (note) deliveryNotes.push(`${product.name}: ${note}`);
 
-    prepared.push({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee: fee });
+    // Marketplace commission — resolved from this product's category chain
+    // (own rate, inherited from an ancestor, or the platform default) and
+    // computed against the buyer-facing unit price actually charged.
+    const { rate: commissionRate, commissionAmountPerUnit: commissionAmountUnit, sellerPayoutPerUnit: sellerPayoutUnit } =
+      await resolveLineCommission(product.category, unitPrice);
+
+    prepared.push({
+      product,
+      variantDoc,
+      quantity,
+      unitPrice,
+      sellerUnitPrice,
+      deliveryFee: fee,
+      commissionRate,
+      commissionAmountUnit,
+      sellerPayoutUnit,
+    });
   }
 
   if (hasNegotiatedItem) {
@@ -232,7 +271,18 @@ const createOrder = asyncHandler(async (req, res) => {
 
   // ---------------- PASS 2: everything validated — now commit stock + build order ----------------
   const orderItems = prepared.map(
-    ({ product, variantDoc, quantity, unitPrice, sellerUnitPrice, deliveryFee, flashSale }) => ({
+    ({
+      product,
+      variantDoc,
+      quantity,
+      unitPrice,
+      sellerUnitPrice,
+      deliveryFee,
+      flashSale,
+      commissionRate,
+      commissionAmountUnit,
+      sellerPayoutUnit,
+    }) => ({
       product: product._id,
       variant: variantDoc ? variantDoc._id : null,
       variantLabel: variantDoc ? variantDoc.combination.map((c) => c.value).join(' / ') : '',
@@ -251,6 +301,12 @@ const createOrder = asyncHandler(async (req, res) => {
       deliveryFee,
       isFlashDeal: !!flashSale,
       flashSale: flashSale ? flashSale._id : null,
+      // Marketplace commission snapshot — see the field comments on
+      // orderItemSchema in models/Order.js for why these are stored rather
+      // than resolved live on every read.
+      commissionRate,
+      commissionAmount: commissionAmountUnit * quantity,
+      sellerPayout: sellerPayoutUnit * quantity,
     })
   );
 
@@ -592,8 +648,6 @@ const cancelOrder = asyncHandler(async (req, res) => {
     );
   }
 });
-
-
 
 module.exports = {
   createOrder,

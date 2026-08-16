@@ -7,6 +7,7 @@ const {
   createCategory,
   updateCategory,
   deleteCategory,
+  getCategoryCommission,
 } = require('../controllers/categoryController');
 const { getCategoryAttributes } = require('../controllers/categoryAttributeController');
 const { protect, authorize } = require('../middleware/authMiddleware');
@@ -19,6 +20,11 @@ router.get('/tree', getCategoryTree);
 // Which attributes apply to this category (used by the seller product form + storefront filters).
 // Safe ahead of /:slug since it's a two-segment path ("/:id/attributes"), not a single slug.
 router.get('/:id/attributes', getCategoryAttributes);
+
+// Effective marketplace commission for this category (own rate, inherited, or
+// platform default). Also a two-segment path, safe ahead of /:slug. Public so
+// sellers can see it live while picking a category on the product form.
+router.get('/:id/commission', getCategoryCommission);
 
 router.get('/:slug', getCategoryBySlug);
 
