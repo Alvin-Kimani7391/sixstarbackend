@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const asyncHandler = require('express-async-handler');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
@@ -526,6 +527,165 @@ const getSellerOrders = asyncHandler(async (req, res) => {
   res.json({ success: true, count: filtered.length, orders: filtered });
 });
 
+// ===================================================================
+// @desc    Seller's own earnings dashboard — total sales, marketplace
+//          commission taken, net payout, a 30-day trend, and top/least
+//          selling products. Mirrors the admin order-detail commission
+//          math (see orderItemSchema in models/Order.js) but scoped to
+//          just this seller's own line items and aggregated server-side
+//          so the dashboard stays fast even with a large order history.
+//
+//          Only lines from orders whose payment is 'confirmed' AND whose
+//          orderStatus isn't 'cancelled' count toward the seller's real
+//          earnings — a pending M-Pesa confirmation or a cancelled order
+//          was never actually money in hand. Those are surfaced
+//          separately as "pending" figures so sellers can still see
+//          what's in the pipeline without it being double-counted as
+//          confirmed income.
+// @route   GET /api/orders/my-earnings
+// @access  Private (wholesaler, retailer)
+// ===================================================================
+const getMyEarnings = asyncHandler(async (req, res) => {
+  const sellerId = new mongoose.Types.ObjectId(req.user._id);
+
+  // 30-day window (including today) for the daily trend chart.
+  const since = new Date();
+  since.setHours(0, 0, 0, 0);
+  since.setDate(since.getDate() - 29);
+
+  const pipeline = [
+    // Cheap pre-filter on the indexed top-level array field before unwinding,
+    // so we're not unwinding every order in the collection.
+    { $match: { 'items.seller': sellerId } },
+    { $unwind: '$items' },
+    { $match: { 'items.seller': sellerId } },
+    {
+      $addFields: {
+        lineRevenue: { $multiply: ['$items.priceAtPurchase', '$items.quantity'] },
+        isConfirmed: {
+          $and: [{ $eq: ['$paymentStatus', 'confirmed'] }, { $ne: ['$orderStatus', 'cancelled'] }],
+        },
+        isPending: { $eq: ['$paymentStatus', 'pending_verification'] },
+      },
+    },
+    {
+      $facet: {
+        // ---- Confirmed, real earnings ----
+        totals: [
+          { $match: { isConfirmed: true } },
+          {
+            $group: {
+              _id: null,
+              totalRevenue: { $sum: '$lineRevenue' },
+              totalCommission: { $sum: '$items.commissionAmount' },
+              totalPayout: { $sum: '$items.sellerPayout' },
+              totalUnitsSold: { $sum: '$items.quantity' },
+              orderIds: { $addToSet: '$_id' },
+            },
+          },
+        ],
+        // ---- Still awaiting M-Pesa confirmation — shown separately, never
+        // folded into the confirmed totals above ----
+        pending: [
+          { $match: { isPending: true } },
+          {
+            $group: {
+              _id: null,
+              pendingRevenue: { $sum: '$lineRevenue' },
+              pendingPayout: { $sum: '$items.sellerPayout' },
+              orderIds: { $addToSet: '$_id' },
+            },
+          },
+        ],
+        // ---- Per-product breakdown (confirmed sales only), used for both
+        // the top-sellers and least-sellers lists on the frontend ----
+        byProduct: [
+          { $match: { isConfirmed: true } },
+          {
+            $group: {
+              _id: '$items.product',
+              name: { $first: '$items.name' },
+              image: { $first: '$items.image' },
+              unitsSold: { $sum: '$items.quantity' },
+              revenue: { $sum: '$lineRevenue' },
+              commission: { $sum: '$items.commissionAmount' },
+              payout: { $sum: '$items.sellerPayout' },
+            },
+          },
+          { $sort: { unitsSold: -1 } },
+        ],
+        // ---- Daily trend, last 30 days (confirmed sales only) ----
+        dailyTrend: [
+          { $match: { isConfirmed: true, createdAt: { $gte: since } } },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+              revenue: { $sum: '$lineRevenue' },
+              payout: { $sum: '$items.sellerPayout' },
+            },
+          },
+        ],
+      },
+    },
+  ];
+
+  const [result] = await Order.aggregate(pipeline);
+
+  const totals = (result?.totals || [])[0] || {
+    totalRevenue: 0,
+    totalCommission: 0,
+    totalPayout: 0,
+    totalUnitsSold: 0,
+    orderIds: [],
+  };
+  const pending = (result?.pending || [])[0] || {
+    pendingRevenue: 0,
+    pendingPayout: 0,
+    orderIds: [],
+  };
+  const byProduct = result?.byProduct || [];
+
+  const topProducts = byProduct.slice(0, 5);
+  // Least-selling, but still genuinely selling — an unsold product isn't
+  // "underperforming," it's just never been ordered, so it has no place on
+  // a "least sold" list built from actual sales.
+  const leastProducts = [...byProduct].sort((a, b) => a.unitsSold - b.unitsSold).slice(0, 5);
+
+  // Zero-filled 30-day trend so the frontend can draw a continuous chart
+  // even on days with no sales at all.
+  const trendMap = new Map((result?.dailyTrend || []).map((d) => [d._id, d]));
+  const dailyTrend = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const row = trendMap.get(key);
+    dailyTrend.push({ date: key, revenue: row ? row.revenue : 0, payout: row ? row.payout : 0 });
+  }
+
+  const confirmedOrderCount = (totals.orderIds || []).length;
+
+  res.json({
+    success: true,
+    totalRevenue: totals.totalRevenue || 0,
+    totalCommission: totals.totalCommission || 0,
+    totalPayout: totals.totalPayout || 0,
+    totalUnitsSold: totals.totalUnitsSold || 0,
+    confirmedOrderCount,
+    averageOrderValue: confirmedOrderCount ? Math.round((totals.totalPayout || 0) / confirmedOrderCount) : 0,
+    // Effective commission rate across everything sold, handy for a single
+    // "you're paying about X% on average" headline figure.
+    effectiveCommissionRate:
+      totals.totalRevenue > 0 ? Math.round(((totals.totalCommission || 0) / totals.totalRevenue) * 1000) / 10 : 0,
+    pendingRevenue: pending.pendingRevenue || 0,
+    pendingPayout: pending.pendingPayout || 0,
+    pendingOrderCount: (pending.orderIds || []).length,
+    topProducts,
+    leastProducts,
+    dailyTrend,
+  });
+});
+
 // @desc    Seller/admin updates order fulfillment status
 // @route   PATCH /api/orders/:id/status
 // @access  Private (seller of an item in the order, or admin)
@@ -655,6 +815,7 @@ module.exports = {
   trackOrderPublic,
   getOrderById,
   getSellerOrders,
+  getMyEarnings,
   updateOrderStatus,
   cancelOrder,
   getAdminEmails,
