@@ -23,6 +23,8 @@ const {
   verifyOrderPayment,
   getAllUsers,
   setUserStatus,
+  getEarningsSummary,   // <-- add
+  getEarningsOrders,    // <-- add
 } = require('../controllers/adminController');
 
 const { getAllAdsAdmin } = require('../controllers/adController');
@@ -141,6 +143,13 @@ router.patch('/flash-sales/:id/reject', rejectFlashSale);
 router.get('/orders', getAllOrdersAdmin);
 router.get('/orders/pending-payment', getPendingPaymentOrders);
 router.patch('/orders/:id/verify-payment', verifyOrderPayment);
+
+
+// ============================================================
+// Earnings
+// ============================================================
+router.get('/earnings/summary', getEarningsSummary);
+router.get('/earnings/orders', getEarningsOrders);
 
 // ============================================================
 // Ads

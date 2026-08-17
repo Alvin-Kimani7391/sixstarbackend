@@ -154,6 +154,228 @@ const getAllOrdersAdmin = asyncHandler(async (req, res) => {
   });
 });
 
+
+// ============================================================
+// EARNINGS
+// ============================================================
+
+// @desc    Aggregate marketplace earnings — gross commission, agent payouts,
+//          net earnings, plus breakdowns by seller role, top sellers, and
+//          top agents. Defaults to CONFIRMED-payment orders only (real
+//          money), but accepts paymentStatus=all / pending_verification /
+//          rejected to inspect other slices.
+// @route   GET /api/admin/earnings/summary?from=&to=&paymentStatus=confirmed
+// @access  Private (admin)
+const getEarningsSummary = asyncHandler(async (req, res) => {
+  const { from, to, paymentStatus = 'confirmed' } = req.query;
+
+  const match = {};
+  if (paymentStatus && paymentStatus !== 'all') match.paymentStatus = paymentStatus;
+  if (from || to) {
+    match.createdAt = {};
+    if (from) match.createdAt.$gte = new Date(from);
+    if (to) {
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+      match.createdAt.$lte = toDate;
+    }
+  }
+
+  const [totalsAgg] = await Order.aggregate([
+    { $match: match },
+    {
+      $addFields: {
+        orderMarketplaceCommission: { $sum: '$items.commissionAmount' },
+        orderSellerPayout: { $sum: '$items.sellerPayout' },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        totalOrders: { $sum: 1 },
+        totalRevenue: { $sum: '$totalAmount' },
+        totalDeliveryFees: { $sum: '$deliveryFee' },
+        totalMarketplaceCommission: { $sum: '$orderMarketplaceCommission' },
+        totalSellerPayout: { $sum: '$orderSellerPayout' },
+        totalAgentCommission: { $sum: '$commissionAmount' },
+        ordersWithAgent: { $sum: { $cond: [{ $ifNull: ['$agent', false] }, 1, 0] } },
+      },
+    },
+  ]);
+
+  const totals = totalsAgg || {
+    totalOrders: 0,
+    totalRevenue: 0,
+    totalDeliveryFees: 0,
+    totalMarketplaceCommission: 0,
+    totalSellerPayout: 0,
+    totalAgentCommission: 0,
+    ordersWithAgent: 0,
+  };
+  delete totals._id;
+
+  // --- By seller role (wholesaler vs retailer) ---
+  const roleBreakdown = await Order.aggregate([
+    { $match: match },
+    { $unwind: '$items' },
+    {
+      $group: {
+        _id: '$items.sellerRole',
+        commission: { $sum: '$items.commissionAmount' },
+        payout: { $sum: '$items.sellerPayout' },
+        itemsSold: { $sum: '$items.quantity' },
+      },
+    },
+    { $sort: { commission: -1 } },
+  ]);
+
+  // --- Top 10 sellers by commission generated ---
+  const topSellersRaw = await Order.aggregate([
+    { $match: match },
+    { $unwind: '$items' },
+    {
+      $group: {
+        _id: '$items.seller',
+        role: { $first: '$items.sellerRole' },
+        commission: { $sum: '$items.commissionAmount' },
+        payout: { $sum: '$items.sellerPayout' },
+        itemsSold: { $sum: '$items.quantity' },
+      },
+    },
+    { $sort: { commission: -1 } },
+    { $limit: 10 },
+    { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'sellerDoc' } },
+    { $unwind: { path: '$sellerDoc', preserveNullAndEmptyArrays: true } },
+  ]);
+
+  const topSellers = topSellersRaw.map((s) => ({
+    id: s._id,
+    name: s.sellerDoc?.businessName || s.sellerDoc?.shopName || s.sellerDoc?.name || 'Unknown seller',
+    role: s.role,
+    commission: s.commission,
+    payout: s.payout,
+    itemsSold: s.itemsSold,
+  }));
+
+  // --- Top 10 agents by commission PAID OUT ---
+  const topAgentsRaw = await Order.aggregate([
+    { $match: { ...match, agent: { $ne: null } } },
+    {
+      $group: {
+        _id: '$agent',
+        commission: { $sum: '$commissionAmount' },
+        orders: { $sum: 1 },
+      },
+    },
+    { $sort: { commission: -1 } },
+    { $limit: 10 },
+    { $lookup: { from: 'agents', localField: '_id', foreignField: '_id', as: 'agentDoc' } },
+    { $unwind: { path: '$agentDoc', preserveNullAndEmptyArrays: true } },
+  ]);
+
+  const topAgents = topAgentsRaw.map((a) => ({
+    id: a._id,
+    name: a.agentDoc?.name || 'Unknown agent',
+    code: a.agentDoc?.code || '',
+    commission: a.commission,
+    orders: a.orders,
+  }));
+
+  res.json({
+    success: true,
+    filters: { from: from || null, to: to || null, paymentStatus },
+    totals,
+    netMarketplaceEarnings: (totals.totalMarketplaceCommission || 0) - (totals.totalAgentCommission || 0),
+    roleBreakdown,
+    topSellers,
+    topAgents,
+  });
+});
+
+// @desc    Paginated per-order earnings breakdown — every order with its
+//          marketplace commission, agent commission, seller payout, and
+//          full per-item commission detail. This is the "each earning with
+//          its associated order" view.
+// @route   GET /api/admin/earnings/orders?from=&to=&paymentStatus=confirmed&search=&page=&limit=
+// @access  Private (admin)
+const getEarningsOrders = asyncHandler(async (req, res) => {
+  const { from, to, paymentStatus = 'confirmed', search, page = 1, limit = 20 } = req.query;
+
+  const filter = {};
+  if (paymentStatus && paymentStatus !== 'all') filter.paymentStatus = paymentStatus;
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(from);
+    if (to) {
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+      filter.createdAt.$lte = toDate;
+    }
+  }
+  if (search && search.trim()) {
+    const q = search.trim();
+    filter.$or = [
+      { orderNumber: { $regex: q, $options: 'i' } },
+      { mpesaCode: { $regex: q, $options: 'i' } },
+    ];
+  }
+
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const [orders, total] = await Promise.all([
+    Order.find(filter)
+      .populate('buyer', 'name phone email')
+      .populate('agent', 'name code commissionRate')
+      .populate('items.seller', 'name businessName shopName role')
+      .sort('-createdAt')
+      .skip(skip)
+      .limit(Number(limit)),
+    Order.countDocuments(filter),
+  ]);
+
+  const results = orders.map((o) => {
+    const marketplaceCommission = o.items.reduce((sum, i) => sum + (i.commissionAmount || 0), 0);
+    const sellerPayout = o.items.reduce((sum, i) => sum + (i.sellerPayout || 0), 0);
+    const agentCommission = o.commissionAmount || 0;
+
+    return {
+      _id: o._id,
+      orderNumber: o.orderNumber,
+      buyer: o.buyer,
+      createdAt: o.createdAt,
+      paymentStatus: o.paymentStatus,
+      orderStatus: o.orderStatus,
+      totalAmount: o.totalAmount,
+      itemsCount: o.items.length,
+      marketplaceCommission,
+      sellerPayout,
+      agent: o.agent,
+      agentCommission,
+      netMarketplaceEarning: marketplaceCommission - agentCommission,
+      items: o.items.map((i) => ({
+        name: i.name,
+        seller: i.seller,
+        quantity: i.quantity,
+        priceAtPurchase: i.priceAtPurchase,
+        commissionRate: i.commissionRate,
+        commissionAmount: i.commissionAmount,
+        sellerPayout: i.sellerPayout,
+      })),
+    };
+  });
+
+  res.json({
+    success: true,
+    count: results.length,
+    total,
+    page: Number(page),
+    pages: Math.ceil(total / Number(limit)),
+    orders: results,
+  });
+});
+
+
+
 // @desc    Get all products awaiting admin review (status = pending_review)
 // @route   GET /api/admin/products/pending
 // @access  Private (admin)
@@ -370,4 +592,6 @@ module.exports = {
   verifyOrderPayment,
   getAllUsers,
   setUserStatus,
+  getEarningsSummary,   // <-- add
+  getEarningsOrders,    // <-- add
 };
