@@ -1,3 +1,4 @@
+// utils/emailOtp.js
 const crypto = require('crypto');
 const sendEmail = require('./sendEmail');
 const { emailOtpTemplate } = require('./emailTemplates');
@@ -20,10 +21,12 @@ async function issueEmailVerificationOtp(user) {
   user.emailOtpLastSentAt = new Date();
   await user.save({ validateBeforeSave: false });
 
+  // OTP codes always go out from noreply@sixstarsuppliers.com — never info@.
   await sendEmail({
     to: user.email,
     subject: 'Verify your email — Six Star Suppliers',
     html: emailOtpTemplate({ name: user.name, code }),
+    sender: 'noreply',
   });
 }
 

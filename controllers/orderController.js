@@ -398,12 +398,17 @@ const createOrder = asyncHandler(async (req, res) => {
 });
 
 async function sendOrderEmails(order, buyer) {
+  // Every order email below uses sender: 'info' — order confirmations,
+  // seller notifications, and admin alerts are review/status notifications,
+  // not OTP/account-security codes.
+
   // 1) Buyer confirmation
   safeSendEmail(
     {
       to: buyer.email,
       subject: `Order Confirmation - ${order.orderNumber}`,
       html: orderConfirmationTemplate({ order, buyerName: buyer.name }),
+      sender: 'info',
     },
     'Buyer order confirmation'
   );
@@ -422,6 +427,7 @@ async function sendOrderEmails(order, buyer) {
         to: seller.email,
         subject: `New Order - ${order.orderNumber}`,
         html: newOrderSellerTemplate({ order, sellerName: seller.name, items }),
+        sender: 'info',
       },
       'Seller new-order notification'
     );
@@ -435,6 +441,7 @@ async function sendOrderEmails(order, buyer) {
         to,
         subject: `New Order Needs Payment Verification - ${order.orderNumber}`,
         html: newOrderAdminTemplate({ order, buyerName: buyer.name }),
+        sender: 'info',
       },
       'Admin new-order alert'
     );
@@ -719,6 +726,7 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
         to: order.buyer.email,
         subject: `Order Update - ${order.orderNumber}`,
         html: orderStatusUpdateTemplate({ order, buyerName: order.buyer.name, status: orderStatus }),
+        sender: 'info',
       },
       'Order status update'
     );
@@ -803,6 +811,7 @@ const cancelOrder = asyncHandler(async (req, res) => {
         to: order.buyer.email,
         subject: `Order Cancelled - ${order.orderNumber}`,
         html: orderStatusUpdateTemplate({ order, buyerName: order.buyer.name, status: 'cancelled' }),
+        sender: 'info',
       },
       'Order cancellation'
     );

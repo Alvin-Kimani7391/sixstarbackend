@@ -27,10 +27,12 @@ async function issueEmailOtp(user) {
   user.emailOtpLastSentAt = new Date();
   await user.save({ validateBeforeSave: false });
 
+  // OTP codes always go out from noreply@sixstarsuppliers.com — never info@.
   await sendEmail({
     to: user.email,
     subject: 'Verify your email — Six Star Suppliers',
     html: emailOtpTemplate({ name: user.name, code }),
+    sender: 'noreply',
   });
 }
 
@@ -63,7 +65,9 @@ const sendEmailOtp = asyncHandler(async (req, res) => {
   try {
     await issueEmailOtp(user);
   } catch (err) {
-    console.error('OTP email failed:', err.response?.body || err.message);
+    // Brevo errors surface on err.body (see utils/sendEmail.js), not
+    // err.response.body like the old SendGrid SDK did.
+    console.error('OTP email failed:', err.body || err.message);
     res.status(500);
     throw new Error('Could not send the verification email right now. Please try again shortly.');
   }

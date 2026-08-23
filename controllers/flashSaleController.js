@@ -28,7 +28,9 @@
    Emails: every submission fires a receipt to the submitting seller
    AND a review-needed alert to admins; every approve/reject fires a
    decision email back to the seller. All sends are fire-and-forget
-   (safeSendEmail) so a SendGrid hiccup never breaks the API response.
+   (safeSendEmail) so a Brevo hiccup never breaks the API response.
+   All four sends here use sender: 'info' — these are review/decision
+   notifications, not OTP/account-security codes.
    ============================================================ */
 
 const asyncHandler = require('express-async-handler');
@@ -170,6 +172,7 @@ const submitFlashSale = asyncHandler(async (req, res) => {
           product,
           flashSale: populated,
         }),
+        sender: 'info',
       },
       'Flash Sale receipt (seller)'
     );
@@ -188,6 +191,7 @@ const submitFlashSale = asyncHandler(async (req, res) => {
               product,
               flashSale: populated,
             }),
+            sender: 'info',
           },
           'Flash Sale receipt (admin)'
         );
@@ -425,6 +429,7 @@ const approveFlashSale = asyncHandler(async (req, res) => {
           flashSale,
           decision: 'approved',
         }),
+        sender: 'info',
       },
       'Flash Sale decision (approved)'
     );
@@ -472,6 +477,7 @@ const rejectFlashSale = asyncHandler(async (req, res) => {
           decision: 'rejected',
           reason,
         }),
+        sender: 'info',
       },
       'Flash Sale decision (rejected)'
     );

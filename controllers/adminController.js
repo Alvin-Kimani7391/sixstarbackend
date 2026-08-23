@@ -426,6 +426,7 @@ const approveProduct = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: `Product Approved - ${product.name}`,
         html: productApprovedTemplate({ product, sellerName: seller.name }),
+        sender: 'info',
       },
       'Product approved'
     );
@@ -463,6 +464,7 @@ const rejectProduct = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: `Product Needs Changes - ${product.name}`,
         html: productRejectedTemplate({ product, sellerName: seller.name, reason }),
+        sender: 'info',
       },
       'Product rejected'
     );
@@ -548,6 +550,7 @@ const verifyOrderPayment = asyncHandler(async (req, res) => {
             ? `Payment Confirmed - ${order.orderNumber}`
             : `Payment Could Not Be Verified - ${order.orderNumber}`,
         html: paymentDecisionTemplate({ order, buyerName: order.buyer.name, decision }),
+        sender: 'info',
       },
       'Payment verification'
     );

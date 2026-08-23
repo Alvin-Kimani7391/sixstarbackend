@@ -280,12 +280,16 @@ const submitVerification = asyncHandler(async (req, res) => {
   res.json({ success: true, verification: record, message: 'Submitted for review' });
 
   // ---- Receipt emails: one to the seller, one to admins ----
+  // Both go from info@ — these are review-decision style notifications, not
+  // OTP/account-security codes. (Say the word if you'd rather these came
+  // from noreply@ instead — it's a one-line change in each safeSendEmail call.)
   if (req.user.email) {
     safeSendEmail(
       {
         to: req.user.email,
         subject: 'We\u2019ve Received Your Verification Documents',
         html: verificationSubmittedSellerTemplate({ sellerName: req.user.name, tier }),
+        sender: 'info',
       },
       'Seller verification receipt (seller)'
     );
@@ -303,6 +307,7 @@ const submitVerification = asyncHandler(async (req, res) => {
               sellerEmail: req.user.email,
               tier,
             }),
+            sender: 'info',
           },
           'Seller verification receipt (admin)'
         );
@@ -355,6 +360,7 @@ const approveVerification = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: 'You\u2019re Verified! \ud83c\udf89',
         html: verificationDecisionTemplate({ sellerName: seller.name, decision: 'approved' }),
+        sender: 'info',
       },
       'Seller verification decision (approved)'
     );
@@ -380,6 +386,7 @@ const rejectVerification = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: 'Your Seller Verification Needs Changes',
         html: verificationDecisionTemplate({ sellerName: seller.name, decision: 'rejected', reason }),
+        sender: 'info',
       },
       'Seller verification decision (rejected)'
     );

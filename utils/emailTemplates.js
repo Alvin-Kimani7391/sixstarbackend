@@ -7,7 +7,12 @@
 // consistent buttons/badges/tables).
 //
 // Usage: const { welcomeEmailTemplate } = require('../utils/emailTemplates');
-//        await sendEmail({ to, subject, html: welcomeEmailTemplate({ name, role }) });
+//        await sendEmail({ to, subject, html: welcomeEmailTemplate({ name, role }), sender: 'info' });
+//
+// SENDER ROUTING (Brevo) — decided at the call site, not in this file:
+//   sender: 'noreply' -> noreply@sixstarsuppliers.com — OTP / email verification, password reset
+//   sender: 'info'    -> info@sixstarsuppliers.com    — everything else built here
+// See utils/sendEmail.js for the enforcement (it throws if sender is missing).
 
 /* ------------------------------------------------------------------ */
 /* URL FIX — 2026-08-11                                                */
@@ -44,8 +49,20 @@
 const FRONTEND_URL = 'https://sixstarsuppliers.com';
 const ADMIN_URL = `${FRONTEND_URL}/site/admin.html`;
 // ASSUMED base for seller-facing pages — adjust if your folder/file names differ.
-const SELLER_URL = `${FRONTEND_URL}/six-star-suppliers`;
+const SELLER_URL = `${FRONTEND_URL}/six-star-suppliers/login.html`;
 const BRAND_NAME = 'Six Star Suppliers';
+
+// Shown on OTP / password-reset / any "you requested this" security email,
+// and quietly in every footer so every email looks and feels professional.
+const SUPPORT_EMAIL = 'support@sixstarsuppliers.com';
+
+// LOGO — set EMAIL_LOGO_URL in your environment to a hosted image URL
+// (PNG or SVG, ~280-320px wide source so it stays crisp at 140px display
+// width, ideally on a transparent or navy-safe background since it sits on
+// the dark navy header). A Cloudinary URL works well since this codebase
+// already uploads to Cloudinary elsewhere. Until you set it, the header
+// falls back to a clean text wordmark so emails never look broken.
+const LOGO_URL = process.env.EMAIL_LOGO_URL || '';
 
 /* ------------------------------------------------------------------ */
 /* THEME — deep navy + a muted marigold accent, warm paper background. */
@@ -160,6 +177,9 @@ function baseLayout({ preheader = '', eyebrow = '', title = '', intro = '', body
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
                 <tr>
                   <td class="ss-header-pad" style="background:${COLORS.headerFrom};background-image:linear-gradient(135deg,${COLORS.headerFrom},${COLORS.headerTo});padding:32px 36px;text-align:center;">
+                    ${LOGO_URL
+                      ? `<img src="${LOGO_URL}" alt="${BRAND_NAME}" width="140" style="max-width:140px;width:140px;height:auto;display:block;margin:0 auto 14px;border:0;">`
+                      : `<div style="font-size:20px;font-weight:800;color:#ffffff;letter-spacing:0.3px;margin-bottom:14px;">${BRAND_NAME}</div>`}
                     <div style="font-size:12px;letter-spacing:2px;color:rgba(255,255,255,0.62);text-transform:uppercase;font-weight:600;margin-bottom:8px;">
                       ${eyebrow || BRAND_NAME}
                     </div>
@@ -185,6 +205,9 @@ function baseLayout({ preheader = '', eyebrow = '', title = '', intro = '', body
                 <tr>
                   <td class="ss-footer ss-footer-pad ss-border" style="background:#faf7f1;padding:22px 36px;text-align:center;border-top:1px solid ${COLORS.border};">
                     ${footerNote ? `<p class="ss-muted" style="margin:0 0 8px;font-size:12px;color:${COLORS.muted};">${footerNote}</p>` : ''}
+                    <p class="ss-muted" style="margin:0 0 8px;font-size:12px;color:${COLORS.muted};">
+                      Need help? Contact us at <a href="mailto:${SUPPORT_EMAIL}" style="color:${COLORS.accentDark};text-decoration:none;font-weight:600;">${SUPPORT_EMAIL}</a>
+                    </p>
                     <p class="ss-muted" style="margin:0;font-size:12px;color:${COLORS.muted};">
                       © ${new Date().getFullYear()} ${BRAND_NAME}. All rights reserved.
                     </p>
@@ -258,6 +281,23 @@ function reasonBox(reason) {
         Reason
       </div>
       <div style="font-size:13px;color:${COLORS.ink};line-height:1.6;">${reason}</div>
+    </div>`;
+}
+
+// Used on OTP / password-reset (and any other "you requested this" security
+// email) so the recipient knows exactly what to do if THEY didn't request
+// it — points straight at support@sixstarsuppliers.com.
+function securityWarningBox() {
+  return `
+    <div style="background:#fff8ec;border:1px solid #f0dcb0;border-radius:10px;padding:14px 16px;margin:22px 0 0;">
+      <div style="font-size:12px;font-weight:700;color:${COLORS.warning};text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;">
+        Didn't request this?
+      </div>
+      <div style="font-size:13px;color:${COLORS.ink};line-height:1.6;">
+        If you did not request this, your account may be at risk. Please do not share this code or link with
+        anyone, and contact us immediately at
+        <a href="mailto:${SUPPORT_EMAIL}" style="color:${COLORS.accentDark};font-weight:600;">${SUPPORT_EMAIL}</a>.
+      </div>
     </div>`;
 }
 
@@ -363,9 +403,7 @@ function passwordResetEmailTemplate(name, resetUrl) {
       This link expires in <strong>15 minutes</strong> for your security.
     </p>
     ${button(resetUrl, 'Reset Password')}
-    <p style="margin:20px 0 0;font-size:13px;color:${COLORS.muted};line-height:1.6;">
-      If you didn't request this, you can safely ignore this email — your password stays unchanged.
-    </p>
+    ${securityWarningBox()}
     <hr style="border:none;border-top:1px solid ${COLORS.border};margin:22px 0;">
     <p style="margin:0;font-size:12px;color:${COLORS.muted};word-break:break-all;">
       Button not working? Paste this link into your browser:<br>${resetUrl}
@@ -419,9 +457,7 @@ function emailOtpTemplate({ name, code }) {
     <p class="ss-muted" style="text-align:center;margin:8px 0 0;font-size:13px;color:${COLORS.muted};">
       This code expires in <strong class="ss-ink" style="color:${COLORS.ink};">10 minutes</strong>.
     </p>
-    <p class="ss-muted" style="margin:22px 0 0;font-size:13px;color:${COLORS.muted};line-height:1.6;">
-      If you didn't request this, you can safely ignore this email — no changes will be made to your account.
-    </p>
+    ${securityWarningBox()}
   `;
 
   return baseLayout({
@@ -919,10 +955,13 @@ module.exports = {
   infoCard,
   statusBadge,
   reasonBox,
+  securityWarningBox,
   orderItemsTable,
   FRONTEND_URL,
   ADMIN_URL,
   SELLER_URL,
+  SUPPORT_EMAIL,
+  LOGO_URL,
   NO_IMAGE_FALLBACK,
 
   // auth

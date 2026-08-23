@@ -54,19 +54,24 @@ async function issueLoginOtp(user) {
   user.loginOtpLastSentAt = new Date();
   await user.save({ validateBeforeSave: false });
 
+  // Login 2FA codes go out from noreply@sixstarsuppliers.com — same bucket
+  // as email verification and password reset.
   await sendEmail({
     to: user.email,
     subject: 'Your login verification code — Six Star Suppliers',
     html: emailOtpTemplate({ name: user.name, code }),
+    sender: 'noreply',
   });
 }
 
 function sendWelcomeEmail(user) {
+  // Welcome emails aren't OTP/verify — they go from info@sixstarsuppliers.com.
   sendEmail({
     to: user.email,
     subject: `Welcome to Six Star Suppliers, ${user.name?.split(' ')[0] || ''}!`,
     html: welcomeEmailTemplate({ name: user.name, role: user.role }),
-  }).catch((err) => console.error('Welcome email failed:', err.response?.body || err.message));
+    sender: 'info',
+  }).catch((err) => console.error('Welcome email failed:', err.body || err.message));
 }
 
 // @desc    Register a new user (wholesaler, retailer, or buyer)
@@ -122,8 +127,9 @@ const registerUser = asyncHandler(async (req, res) => {
   // Every local registration (buyer, retailer, wholesaler) starts out
   // unverified — fire the first OTP code immediately so the person lands
   // straight on the code-entry screen instead of having to ask for one.
+  // (issueEmailOtp itself sends with sender: 'noreply' — see emailVerificationController.js)
   issueEmailOtp(user).catch((err) =>
-    console.error('Registration OTP email failed:', err.response?.body || err.message)
+    console.error('Registration OTP email failed:', err.body || err.message)
   );
 });
 
@@ -222,7 +228,7 @@ const loginUser = asyncHandler(async (req, res) => {
     try {
       await issueLoginOtp(user);
     } catch (err) {
-      console.error('Login OTP email failed:', err.response?.body || err.message);
+      console.error('Login OTP email failed:', err.body || err.message);
       res.status(500);
       throw new Error('Could not send your login verification code. Please try again shortly.');
     }
@@ -337,7 +343,7 @@ const resendLoginOtp = asyncHandler(async (req, res) => {
   try {
     await issueLoginOtp(user);
   } catch (err) {
-    console.error('Resend login OTP failed:', err.response?.body || err.message);
+    console.error('Resend login OTP failed:', err.body || err.message);
     res.status(500);
     throw new Error('Could not resend the code right now. Please try again shortly.');
   }
@@ -443,17 +449,19 @@ const forgotPassword = asyncHandler(async (req, res) => {
   const resetUrl = `${process.env.FRONTEND_URL}/reset-password.html?token=${rawToken}`;
 
   try {
+    // Password resets go out from noreply@sixstarsuppliers.com.
     await sendEmail({
       to: user.email,
       subject: 'Reset your Six Star Suppliers password',
       html: passwordResetEmailTemplate(user.name, resetUrl),
+      sender: 'noreply',
     });
   } catch (err) {
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
     await user.save({ validateBeforeSave: false });
 
-    console.error('SendGrid send error:', err.response?.body || err.message);
+    console.error('Brevo send error:', err.body || err.message);
     res.status(500);
     throw new Error('Could not send the reset email right now. Please try again shortly.');
   }
