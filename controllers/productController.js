@@ -20,7 +20,9 @@ async function getAdminEmails() {
 }
 
 function safeSendEmail(opts, label) {
-  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
+  // Brevo errors surface on err.body (see utils/sendEmail.js), not
+  // err.response.body like the old SendGrid SDK did.
+  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.body || err.message));
 }
 
 // Notifies every admin that a product needs review (used for both first-time
@@ -33,6 +35,7 @@ async function notifyAdminsProductPending(product, sellerName) {
         to,
         subject: `Product Awaiting Review - ${product.name}`,
         html: productSubmittedAdminTemplate({ product, sellerName }),
+        sender: 'info',
       },
       'Product submitted (admin alert)'
     );

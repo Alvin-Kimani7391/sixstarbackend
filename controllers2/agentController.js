@@ -5,7 +5,9 @@ const sendEmail = require('../utils/sendEmail');
 const { agentWelcomeTemplate } = require('../utils/emailTemplates');
 
 function safeSendEmail(opts, label) {
-  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.response?.body || err.message));
+  // Brevo errors surface on err.body (see utils/sendEmail.js), not
+  // err.response.body like the old SendGrid SDK did.
+  sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.body || err.message));
 }
 
 // @desc    Get all ACTIVE agents - for the checkout page's agent picker
@@ -45,6 +47,7 @@ const createAgent = asyncHandler(async (req, res) => {
         to: agent.email,
         subject: `Your Agent Code - ${agent.code}`,
         html: agentWelcomeTemplate({ name: agent.name, code: agent.code }),
+        sender: 'info',
       },
       'Agent welcome'
     );

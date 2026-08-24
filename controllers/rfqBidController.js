@@ -46,7 +46,12 @@ async function moderateAndTrack(rawText, authorId, res) {
   if (action === 'blocked') {
     if (author.email) {
       safeSendEmail(
-        { to: author.email, subject: 'Messaging Temporarily Restricted', html: messagingRestrictedTemplate({ recipientName: author.name }) },
+        {
+          to: author.email,
+          subject: 'Messaging Temporarily Restricted',
+          html: messagingRestrictedTemplate({ recipientName: author.name }),
+          sender: 'info',
+        },
         'Messaging restricted notice'
       );
     }
@@ -124,6 +129,7 @@ const submitOrUpdateBid = asyncHandler(async (req, res) => {
         html: isUpdate
           ? bidUpdatedBuyerTemplate({ rfq, buyerName: buyer.name })
           : newBidBuyerTemplate({ rfq, buyerName: buyer.name, bidCount: rfq.bidCount }),
+        sender: 'info',
       },
       isUpdate ? 'Bid updated' : 'New bid'
     );
@@ -247,6 +253,7 @@ const acceptBid = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: `You've Been Selected - ${rfq.productName}`,
         html: offerAcceptedSellerTemplate({ rfq, sellerName: seller.name, bid }),
+        sender: 'info',
       },
       'Offer accepted'
     );
@@ -260,6 +267,7 @@ const acceptBid = asyncHandler(async (req, res) => {
           to: rejectedSeller.email,
           subject: `Offer Update - ${rfq.productName}`,
           html: offerRejectedSellerTemplate({ rfq, sellerName: rejectedSeller.name }),
+          sender: 'info',
         },
         'Offer rejected'
       );

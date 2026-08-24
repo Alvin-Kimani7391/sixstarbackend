@@ -42,6 +42,7 @@ function sendShopSubmissionEmails({ sellerName, sellerEmail, shop }) {
         to: sellerEmail,
         subject: `Shop Submitted for Approval - ${shop.shopName}`,
         html: shopSubmittedSellerTemplate({ sellerName, shop }),
+        sender: 'info',
       },
       'Shop receipt (seller)'
     );
@@ -55,6 +56,7 @@ function sendShopSubmissionEmails({ sellerName, sellerEmail, shop }) {
             to,
             subject: `New Shop Submitted - ${shop.shopName}`,
             html: shopSubmittedAdminTemplate({ sellerName, sellerEmail, shop }),
+            sender: 'info',
           },
           'Shop receipt (admin)'
         );
@@ -260,6 +262,7 @@ const approveShop = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: `Shop Approved - ${shop.shopName}`,
         html: shopDecisionTemplate({ sellerName: seller.name, shop, decision: 'approved' }),
+        sender: 'info',
       },
       'Shop decision (approved)'
     );
@@ -295,6 +298,7 @@ const rejectShop = asyncHandler(async (req, res) => {
         to: seller.email,
         subject: `Shop Rejected - ${shop.shopName}`,
         html: shopDecisionTemplate({ sellerName: seller.name, shop, decision: 'rejected', reason }),
+        sender: 'info',
       },
       'Shop decision (rejected)'
     );

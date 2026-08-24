@@ -58,7 +58,12 @@ async function moderateAndTrack(rawText, senderId, res) {
   if (action === 'blocked') {
     if (sender.email) {
       safeSendEmail(
-        { to: sender.email, subject: 'Messaging Temporarily Restricted', html: messagingRestrictedTemplate({ recipientName: sender.name }) },
+        {
+          to: sender.email,
+          subject: 'Messaging Temporarily Restricted',
+          html: messagingRestrictedTemplate({ recipientName: sender.name }),
+          sender: 'info',
+        },
         'Messaging restricted notice'
       );
     }
@@ -143,6 +148,7 @@ const sendMessage = asyncHandler(async (req, res) => {
           isBuyer: isBuyerRecipient,
           senderLabel: maskIdentity(sender, isBuyerRecipient ? 'seller' : 'buyer').label,
         }),
+        sender: 'info',
       },
       'New RFQ message'
     );

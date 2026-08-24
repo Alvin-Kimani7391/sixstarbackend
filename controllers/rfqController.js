@@ -84,6 +84,7 @@ const createRFQ = asyncHandler(async (req, res) => {
         to: buyer.email,
         subject: `Request Posted - ${rfq.productName}`,
         html: rfqPostedBuyerTemplate({ rfq, buyerName: buyer.name }),
+        sender: 'info',
       },
       'RFQ posted'
     );
@@ -106,6 +107,7 @@ const createRFQ = asyncHandler(async (req, res) => {
               to: seller.email,
               subject: `New Buyer Request - ${rfq.productName}`,
               html: relevantRfqSellerTemplate({ rfq, sellerName: seller.name }),
+              sender: 'info',
             },
             'RFQ seller notification'
           );
@@ -247,6 +249,7 @@ const closeRFQ = asyncHandler(async (req, res) => {
         to: buyer.email,
         subject: `Request Closed - ${rfq.productName}`,
         html: rfqClosedTemplate({ rfq, recipientName: buyer.name, isBuyer: true }),
+        sender: 'info',
       },
       'RFQ closed (buyer)'
     );
@@ -259,6 +262,7 @@ const closeRFQ = asyncHandler(async (req, res) => {
           to: seller.email,
           subject: `Request Closed - ${rfq.productName}`,
           html: rfqClosedTemplate({ rfq, recipientName: seller.name, isBuyer: false }),
+          sender: 'info',
         },
         'RFQ closed (seller)'
       );
