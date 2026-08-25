@@ -76,6 +76,8 @@ app.use('/api/flash-sales', require('./routes/flashSaleRoutes'));
 app.use('/api/rfq', require('./routes/rfqRoutes')); // NEW — RFQ / Bidding / Private Chat
 app.use('/', require('./routes/seoRoutes'));
 
+app.use('/api/payments', require('./routes/paymentRoutes')); // NEW — PayHero STK Push
+
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 
 console.log('MERCHANT FEED EXPORT:', merchantFeedRouter);

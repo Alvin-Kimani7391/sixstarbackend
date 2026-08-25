@@ -78,17 +78,20 @@ async function resolveLineCommission(categoryId, unitPrice) {
 // @route   POST /api/orders
 // @access  Private (buyer)
 const createOrder = asyncHandler(async (req, res) => {
-  const { items, shippingAddress, mpesaMessage, agentCode, transportFee } = req.body;
+  const { items, shippingAddress, mpesaMessage, agentCode, transportFee, paymentMethod } = req.body;
+const method = paymentMethod === 'stk' ? 'stk' : 'manual';
 
-  if (!items || items.length === 0) {
-    res.status(400);
-    throw new Error('Order must contain at least one item');
-  }
-  if (!mpesaMessage || mpesaMessage.trim().length < 10) {
-    res.status(400);
-    throw new Error('Please paste your full M-Pesa confirmation message');
-  }
-
+if (!items || items.length === 0) {
+  res.status(400);
+  throw new Error('Order must contain at least one item');
+}
+// Manual payment still requires the pasted M-Pesa SMS up front. STK orders
+// are created "unpaid" — payment is initiated separately via
+// POST /api/payments/initiate-stk right after this order exists.
+if (method === 'manual' && (!mpesaMessage || mpesaMessage.trim().length < 10)) {
+  res.status(400);
+  throw new Error('Please paste your full M-Pesa confirmation message');
+}
   // ---------------- PASS 1: validate everything, mutate nothing ----------------
   let itemsTotal = 0;
   let wholesaleDeliveryTotal = 0;
@@ -366,6 +369,8 @@ const createOrder = asyncHandler(async (req, res) => {
     buyer: req.user._id,
     items: orderItems,
     totalAmount,
+    paymentMethod: method,                                   // NEW
+  mpesaMessage: method === 'manual' ? mpesaMessage : '',    // NEW
     deliveryFee: deliveryFeeTotal,
     deliveryDetails: {
       transportFee: retailTransportFee,
@@ -373,7 +378,7 @@ const createOrder = asyncHandler(async (req, res) => {
       notes: deliveryNotes,
     },
     shippingAddress,
-    mpesaMessage,
+    
     paymentStatus: 'pending_verification',
     agent: agentDoc ? agentDoc._id : null,
     agentCode: agentDoc ? agentDoc.code : '',

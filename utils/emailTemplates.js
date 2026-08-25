@@ -557,6 +557,34 @@ function newOrderAdminTemplate({ order, buyerName }) {
   });
 }
 
+
+// Admin notice for STK Push payments — these confirm automatically via
+// PayHero's webhook, so unlike newOrderAdminTemplate this has no "Verify
+// Payment" CTA. Purely informational: "heads up, this one already got paid."
+function stkPaymentReceivedAdminTemplate({ order, buyerName }) {
+  const viewUrl = `${ADMIN_URL}?section=orders&orderId=${order._id}`;
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      ${statusBadge('Auto-Confirmed via M-Pesa STK', 'success')}
+    </div>
+    ${infoCard([
+      ['Order Number', order.orderNumber],
+      ['Buyer', buyerName || 'N/A'],
+      ['Total', money(order.totalAmount)],
+      ['M-Pesa Receipt', order.mpesaCode || 'N/A'],
+    ])}
+    ${orderItemsTable(order.items)}
+    ${button(viewUrl, 'View Order', COLORS.success)}
+  `;
+  return baseLayout({
+    preheader: `Order ${order.orderNumber} was paid via STK Push — no action needed`,
+    eyebrow: 'Admin Alert',
+    title: 'Payment Auto-Confirmed 🎉',
+    intro: 'A buyer just paid via M-Pesa STK Push. This order is already confirmed — nothing to verify.',
+    bodyHtml,
+  });
+}
+
 // Buyer-facing fulfillment status change (processing / shipped / delivered / cancelled).
 function orderStatusUpdateTemplate({ order, buyerName, status }) {
   const toneMap = { processing: 'accent', shipped: 'accent', delivered: 'success', cancelled: 'danger' };
@@ -973,6 +1001,7 @@ module.exports = {
   orderConfirmationTemplate,
   newOrderSellerTemplate,
   newOrderAdminTemplate,
+  stkPaymentReceivedAdminTemplate,
   orderStatusUpdateTemplate,
   paymentDecisionTemplate,
 

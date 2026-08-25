@@ -2,7 +2,7 @@
 //
 // Email templates for the RFQ / Bidding / Private Chat feature.
 //
-// WHY A SEPARATE FILE: utils/emailTemplates.js is already large and covers
+// WHY A SEPARATE FILE: utils/emailTemplates.js i s already large and covers
 // auth/orders/products/verification/flash-sales/shops/agents. Rather than
 // hand-editing that file (risky to paste back correctly at this size), this
 // file imports its shared building blocks — baseLayout, button, infoCard,
