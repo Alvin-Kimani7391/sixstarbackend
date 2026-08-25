@@ -1,6 +1,9 @@
 const asyncHandler = require('express-async-handler');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
+const Payment = require('../models/Payment');
+const ProductVariant = require('../models/ProductVariant');
+const FlashSale = require('../models/FlashSale');
 const { User } = require('../models/User');
 const safeSendEmail = require('../utils/safeSendEmail');
 const {
@@ -8,6 +11,8 @@ const {
   productRejectedTemplate,
   paymentDecisionTemplate,
 } = require('../utils/emailTemplates');
+const { interpretMpesaResult } = require('../utils/mpesaErrors');
+const { getTransactionStatus } = require('../utils/payhero');
 
 // @desc    Get ALL products regardless of status - the main dashboard product table
 // @route   GET /api/admin/products?status=active&search=phone&page=1&limit=20
@@ -68,7 +73,6 @@ const adminUpdateProduct = asyncHandler(async (req, res) => {
     if (req.body[field] !== undefined) product[field] = req.body[field];
   });
 
-  // Admin can replace product images too (uploaded via the same multer/Cloudinary middleware)
   if (req.files && req.files.length > 0) {
     product.images = req.files.map((file) => file.path);
   }
@@ -108,14 +112,6 @@ const adminDeleteProduct = asyncHandler(async (req, res) => {
 });
 
 // @desc    Get ALL orders (any payment/order status) - full order oversight
-//          NOW populates items.product / items.seller / agent so the admin
-//          panel's expandable order row can show buyer, seller-per-item,
-//          agent, and commission without extra round trips.
-//
-//          Also accepts an optional ?sellerId= filter — used by the Seller
-//          Verification modal to pull "this seller's orders" so the admin
-//          can review fulfillment history and pickup location alongside
-//          identity/business/tax documents in one place.
 // @route   GET /api/admin/orders?paymentStatus=confirmed&orderStatus=processing&sellerId=...
 // @access  Private (admin)
 const getAllOrdersAdmin = asyncHandler(async (req, res) => {
@@ -124,9 +120,6 @@ const getAllOrdersAdmin = asyncHandler(async (req, res) => {
   const filter = {};
   if (paymentStatus) filter.paymentStatus = paymentStatus;
   if (orderStatus) filter.orderStatus = orderStatus;
-  // Matches any order that has at least one line item sold by this seller —
-  // the item-level breakdown (still populated below) is what actually
-  // isolates that seller's items on the frontend.
   if (sellerId) filter.items = { $elemMatch: { seller: sellerId } };
 
   const skip = (Number(page) - 1) * Number(limit);
@@ -154,16 +147,11 @@ const getAllOrdersAdmin = asyncHandler(async (req, res) => {
   });
 });
 
-
 // ============================================================
 // EARNINGS
 // ============================================================
 
-// @desc    Aggregate marketplace earnings — gross commission, agent payouts,
-//          net earnings, plus breakdowns by seller role, top sellers, and
-//          top agents. Defaults to CONFIRMED-payment orders only (real
-//          money), but accepts paymentStatus=all / pending_verification /
-//          rejected to inspect other slices.
+// @desc    Aggregate marketplace earnings
 // @route   GET /api/admin/earnings/summary?from=&to=&paymentStatus=confirmed
 // @access  Private (admin)
 const getEarningsSummary = asyncHandler(async (req, res) => {
@@ -214,7 +202,6 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
   };
   delete totals._id;
 
-  // --- By seller role (wholesaler vs retailer) ---
   const roleBreakdown = await Order.aggregate([
     { $match: match },
     { $unwind: '$items' },
@@ -229,7 +216,6 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
     { $sort: { commission: -1 } },
   ]);
 
-  // --- Top 10 sellers by commission generated ---
   const topSellersRaw = await Order.aggregate([
     { $match: match },
     { $unwind: '$items' },
@@ -257,7 +243,6 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
     itemsSold: s.itemsSold,
   }));
 
-  // --- Top 10 agents by commission PAID OUT ---
   const topAgentsRaw = await Order.aggregate([
     { $match: { ...match, agent: { $ne: null } } },
     {
@@ -292,10 +277,7 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Paginated per-order earnings breakdown — every order with its
-//          marketplace commission, agent commission, seller payout, and
-//          full per-item commission detail. This is the "each earning with
-//          its associated order" view.
+// @desc    Paginated per-order earnings breakdown
 // @route   GET /api/admin/earnings/orders?from=&to=&paymentStatus=confirmed&search=&page=&limit=
 // @access  Private (admin)
 const getEarningsOrders = asyncHandler(async (req, res) => {
@@ -374,8 +356,6 @@ const getEarningsOrders = asyncHandler(async (req, res) => {
   });
 });
 
-
-
 // @desc    Get all products awaiting admin review (status = pending_review)
 // @route   GET /api/admin/products/pending
 // @access  Private (admin)
@@ -383,7 +363,7 @@ const getPendingProducts = asyncHandler(async (req, res) => {
   const products = await Product.find({ status: 'pending_review' })
     .populate('category', 'name')
     .populate('seller', 'name businessName shopName role email phone')
-    .sort('createdAt'); // oldest first, so nothing sits waiting too long
+    .sort('createdAt');
 
   res.json({ success: true, count: products.length, products });
 });
@@ -491,7 +471,7 @@ const updateProductPricing = asyncHandler(async (req, res) => {
   res.json({ success: true, product });
 });
 
-// @desc    Admin suspends a live product (pulls it from the storefront without deleting it)
+// @desc    Admin suspends a live product
 // @route   PATCH /api/admin/products/:id/suspend
 // @access  Private (admin)
 const suspendProduct = asyncHandler(async (req, res) => {
@@ -505,18 +485,38 @@ const suspendProduct = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Product suspended', product });
 });
 
-// @desc    Get all orders awaiting M-Pesa payment verification
+// ============================================================
+// PAYMENTS — MANUAL VERIFICATION QUEUE (M-Pesa SMS orders ONLY)
+// ============================================================
+
+// @desc    Get orders awaiting MANUAL M-Pesa payment verification.
+//
+//          FIX: this used to query { paymentStatus: 'pending_verification' }
+//          with no paymentMethod filter. STK orders start life at exactly
+//          that same status before the webhook resolves them — which meant
+//          a buyer's STK order sitting mid-flow (or one whose webhook was
+//          delayed) could appear in this queue looking exactly like a
+//          manual order genuinely waiting for an admin to eyeball an M-Pesa
+//          SMS. An admin clicking "Confirm" on it would mark an order paid
+//          that was never actually paid for — a real loophole. STK payments
+//          are ONLY ever resolved by the PayHero webhook (or the admin
+//          "Recheck with M-Pesa" / "Cancel" actions below) — never by a
+//          human eyeballing an SMS that doesn't exist for that order.
 // @route   GET /api/admin/orders/pending-payment
 // @access  Private (admin)
 const getPendingPaymentOrders = asyncHandler(async (req, res) => {
-  const orders = await Order.find({ paymentStatus: 'pending_verification' })
+  const orders = await Order.find({ paymentStatus: 'pending_verification', paymentMethod: 'manual' })
     .populate('buyer', 'name phone email')
     .sort('createdAt');
 
   res.json({ success: true, count: orders.length, orders });
 });
 
-// @desc    Admin confirms or rejects an order's M-Pesa payment after manual cross-check
+// @desc    Admin confirms or rejects a MANUAL order's M-Pesa payment after
+//          manually cross-checking the pasted SMS. Blocked for STK orders —
+//          see the comment above; there is no SMS to check for those, and
+//          "confirming" one would mean an admin vouching for a payment they
+//          have no way to actually verify.
 // @route   PATCH /api/admin/orders/:id/verify-payment
 // @access  Private (admin)
 const verifyOrderPayment = asyncHandler(async (req, res) => {
@@ -531,6 +531,13 @@ const verifyOrderPayment = asyncHandler(async (req, res) => {
   if (!order) {
     res.status(404);
     throw new Error('Order not found');
+  }
+
+  if (order.paymentMethod === 'stk') {
+    res.status(400);
+    throw new Error(
+      'This order was paid via M-Pesa STK Push and is verified automatically by M-Pesa — it cannot be manually confirmed or rejected. Use "Recheck with M-Pesa" or "Cancel & Restore Stock" instead, under STK Push Issues.'
+    );
   }
 
   order.paymentStatus = decision;
@@ -557,7 +564,176 @@ const verifyOrderPayment = asyncHandler(async (req, res) => {
   }
 });
 
-// @desc    Get all users, filterable by role - for admin user management
+// ============================================================
+// PAYMENTS — STK PUSH ISSUES (failed / stuck / abandoned attempts)
+// ============================================================
+
+// @desc    Orders paid via STK Push that are NOT resolved as paid — either
+//          a definitive failure came back (wrong PIN, insufficient balance,
+//          cancelled, timeout) or the webhook hasn't reported back yet.
+//          These are never in the manual-verification queue (see above) —
+//          this is the dedicated place admins monitor STK health and step
+//          in if the automatic paymentReaper hasn't cleaned something up yet.
+// @route   GET /api/admin/orders/stk-issues
+// @access  Private (admin)
+const getStkPaymentIssues = asyncHandler(async (req, res) => {
+  const orders = await Order.find({
+    paymentMethod: 'stk',
+    paymentStatus: { $in: ['pending_verification', 'rejected'] },
+    orderStatus: 'processing',
+  })
+    .populate('buyer', 'name phone email')
+    .sort('stk.lastAttemptAt');
+
+  res.json({ success: true, count: orders.length, orders });
+});
+
+// @desc    Admin manually re-polls PayHero for this order's most recent STK
+//          attempt — a fallback for when the webhook is lost/delayed. Does
+//          NOT let the admin declare a payment successful themselves; it
+//          only relays what PayHero itself reports, using the exact same
+//          ResultCode interpretation as the webhook.
+// @route   PATCH /api/admin/orders/:id/stk-recheck
+// @access  Private (admin)
+const recheckStkPayment = asyncHandler(async (req, res) => {
+  const order = await Order.findById(req.params.id).populate('buyer', 'name email');
+  if (!order) {
+    res.status(404);
+    throw new Error('Order not found');
+  }
+  if (order.paymentMethod !== 'stk') {
+    res.status(400);
+    throw new Error('This order was not paid via STK Push');
+  }
+  if (order.paymentStatus === 'confirmed') {
+    res.status(400);
+    throw new Error('This order is already confirmed as paid');
+  }
+
+  const payment = await Payment.findOne({ order: order._id }).sort('-createdAt');
+  if (!payment || !payment.payheroReference) {
+    res.status(400);
+    throw new Error('No STK attempt on record for this order to recheck');
+  }
+
+  let phResult;
+  try {
+    phResult = await getTransactionStatus(payment.payheroReference);
+  } catch (err) {
+    res.status(502);
+    throw new Error(`Could not reach PayHero: ${err.message}`);
+  }
+
+  // Tolerate PayHero's status-check response shape, which nests the same
+  // ResultCode/ResultDesc fields the webhook sends, sometimes under
+  // `.transaction` or at the top level depending on account/version.
+  const result = phResult.transaction || phResult;
+  const resultCode = result.ResultCode ?? result.result_code ?? result.status_code;
+  const resultDesc = result.ResultDesc ?? result.result_desc ?? result.status;
+
+  if (resultCode === undefined || resultCode === null) {
+    res.json({
+      success: true,
+      message: 'PayHero has no final result for this attempt yet — still pending.',
+      raw: phResult,
+    });
+    return;
+  }
+
+  const interpreted = interpretMpesaResult(resultCode, resultDesc);
+  const succeeded = interpreted.type === 'success';
+
+  if (payment.status === 'queued') {
+    payment.resultCode = Number(resultCode);
+    payment.resultDesc = String(resultDesc || '');
+    payment.status = succeeded ? 'success' : 'failed';
+    payment.failureType = succeeded ? '' : interpreted.type;
+    payment.mpesaReceiptNumber = result.MpesaReceiptNumber || result.mpesa_receipt || payment.mpesaReceiptNumber;
+    await payment.save();
+  }
+
+  order.stk = {
+    ...order.stk,
+    status: succeeded ? 'success' : 'failed',
+    failureType: succeeded ? '' : interpreted.type,
+  };
+
+  if (succeeded && order.paymentStatus !== 'confirmed') {
+    order.paymentStatus = 'confirmed';
+    order.verifiedAt = new Date();
+    order.rejectionReason = '';
+    order.mpesaCode = payment.mpesaReceiptNumber || order.mpesaCode;
+    order.mpesaMessage = order.mpesaMessage || `M-Pesa STK Push — Receipt ${payment.mpesaReceiptNumber || ''}`;
+  } else if (!succeeded && order.paymentStatus !== 'rejected') {
+    order.paymentStatus = 'rejected';
+    order.rejectionReason = interpreted.message;
+  }
+
+  await order.save();
+
+  res.json({
+    success: true,
+    message: succeeded
+      ? 'PayHero confirms this payment succeeded — order marked confirmed.'
+      : `PayHero confirms this payment did not succeed: ${interpreted.message}`,
+    order,
+  });
+});
+
+// @desc    Admin force-cancels an unresolved STK order right now and
+//          restores its reserved stock, instead of waiting for the
+//          automatic paymentReaper sweep (utils/paymentReaper.js). Mirrors
+//          the exact restoration logic used by orderController.cancelOrder
+//          and the reaper, so stock/variant/Flash-Sale bookkeeping never
+//          drifts depending on which path released it.
+// @route   PATCH /api/admin/orders/:id/stk-cancel
+// @access  Private (admin)
+const forceCancelStkOrder = asyncHandler(async (req, res) => {
+  const order = await Order.findById(req.params.id).populate('buyer', 'name email');
+  if (!order) {
+    res.status(404);
+    throw new Error('Order not found');
+  }
+  if (order.paymentMethod !== 'stk') {
+    res.status(400);
+    throw new Error('This action is only for STK Push orders');
+  }
+  if (order.paymentStatus === 'confirmed') {
+    res.status(400);
+    throw new Error('This order is already paid — it cannot be cancelled this way');
+  }
+  if (order.orderStatus === 'cancelled') {
+    res.status(400);
+    throw new Error('This order is already cancelled');
+  }
+
+  for (const item of order.items) {
+    await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } });
+    if (item.variant) {
+      await ProductVariant.findByIdAndUpdate(item.variant, { $inc: { stock: item.quantity } });
+    }
+    if (item.isFlashDeal && item.flashSale) {
+      const restored = await FlashSale.findByIdAndUpdate(
+        item.flashSale,
+        { $inc: { stockSold: -item.quantity } },
+        { new: true }
+      );
+      if (restored && restored.status === 'sold_out' && restored.stockSold < restored.stockAllocated) {
+        const now = new Date();
+        restored.status = restored.endAt < now ? 'ended' : restored.startAt <= now ? 'active' : 'scheduled';
+        await restored.save();
+      }
+    }
+  }
+
+  order.orderStatus = 'cancelled';
+  order.rejectionReason = order.rejectionReason || 'Cancelled by admin — payment was never completed.';
+  await order.save();
+
+  res.json({ success: true, message: 'Order cancelled and stock restored', order });
+});
+
+// @desc    Get all users, filterable by role
 // @route   GET /api/admin/users
 // @access  Private (admin)
 const getAllUsers = asyncHandler(async (req, res) => {
@@ -593,8 +769,11 @@ module.exports = {
   suspendProduct,
   getPendingPaymentOrders,
   verifyOrderPayment,
+  getStkPaymentIssues,   // NEW
+  recheckStkPayment,     // NEW
+  forceCancelStkOrder,   // NEW
   getAllUsers,
   setUserStatus,
-  getEarningsSummary,   // <-- add
-  getEarningsOrders,    // <-- add
+  getEarningsSummary,
+  getEarningsOrders,
 };

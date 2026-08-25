@@ -92,6 +92,7 @@ const orderSchema = new Schema(
       status: { type: String, enum: ['', 'queued', 'success', 'failed'], default: '' },
       phone: { type: String, default: '' },
       lastAttemptAt: { type: Date, default: null },
+      failureType: { type: String, default: '' }, // NEW — machine-readable reason for UI logic
     },
 
     orderStatus: {

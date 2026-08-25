@@ -39,6 +39,7 @@ const paymentSchema = new Schema(
     mpesaReceiptNumber: { type: String, default: '' },
 
     rawInitiateResponse: { type: Schema.Types.Mixed, default: null },
+    failureType: { type: String, default: '' }, // 'wrong_pin' | 'insufficient_funds' | 'cancelled' | 'timeout' | ...
     rawCallbackPayload: { type: Schema.Types.Mixed, default: null },
   },
   { timestamps: true }

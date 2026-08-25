@@ -6,6 +6,7 @@ const safeSendEmail = require('../utils/safeSendEmail');
 const getAdminEmails = require('../utils/getAdminEmails');
 const { paymentDecisionTemplate, stkPaymentReceivedAdminTemplate } = require('../utils/emailTemplates');
 const { initiateStkPush: callPayHeroInitiate } = require('../utils/payhero');
+const { interpretMpesaResult } = require('../utils/mpesaErrors');
 
 // @desc    Buyer triggers an M-Pesa STK Push prompt for an order they already created
 // @route   POST /api/payments/initiate-stk
@@ -38,6 +39,14 @@ const initiateStkPush = asyncHandler(async (req, res) => {
   if (order.paymentStatus === 'confirmed') {
     res.status(400);
     throw new Error('This order has already been paid for');
+  }
+  // NEW — guard against retrying a push on an order the payment reaper (or an
+  // admin) already cancelled and released stock for. Without this, a stale
+  // browser tab could push a real M-Pesa PIN prompt for an order whose items
+  // may have already been resold to someone else.
+  if (order.orderStatus === 'cancelled') {
+    res.status(400);
+    throw new Error('This order was cancelled because payment was never completed. Please checkout again.');
   }
 
   // Normalize to 2547XXXXXXXX / 2541XXXXXXXX — the format PayHero expects.
@@ -79,12 +88,18 @@ const initiateStkPush = asyncHandler(async (req, res) => {
     rawInitiateResponse: phResponse,
   });
 
+  // NEW — clear any stale failure info from a previous failed attempt so the
+  // frontend doesn't briefly show an old "wrong PIN" message while the new
+  // prompt is in flight.
+  order.paymentStatus = 'pending_verification';
+  order.rejectionReason = '';
   order.stk = {
     reference: payment.payheroReference,
     checkoutRequestId: payment.checkoutRequestId,
     status: 'queued',
     phone: normalizedPhone,
     lastAttemptAt: new Date(),
+    failureType: '',
   };
   await order.save();
 
@@ -135,14 +150,19 @@ const handleCallback = asyncHandler(async (req, res) => {
     // payment that's already been settled.
     if (payment.status !== 'queued') return;
 
+    // Interpret Safaricom's ResultCode into a clean, buyer-facing reason —
+    // 0 = success, 1 = insufficient balance, 2001 = wrong PIN, 1032 =
+    // cancelled, 1037 = timeout, etc. See utils/mpesaErrors.js.
+    const interpreted = interpretMpesaResult(ResultCode, ResultDesc);
+    const succeeded = interpreted.type === 'success';
+
     payment.rawCallbackPayload = body;
     payment.resultCode = typeof ResultCode === 'number' ? ResultCode : Number(ResultCode);
     payment.resultDesc = ResultDesc || '';
     payment.merchantRequestId = MerchantRequestID || payment.merchantRequestId;
     payment.mpesaReceiptNumber = MpesaReceiptNumber || '';
-
-    const succeeded = payment.resultCode === 0;
     payment.status = succeeded ? 'success' : 'failed';
+    payment.failureType = succeeded ? '' : interpreted.type;
     await payment.save();
 
     const order = await Order.findById(payment.order).populate('buyer', 'name email');
@@ -154,15 +174,24 @@ const handleCallback = asyncHandler(async (req, res) => {
       status: payment.status,
       phone: order.stk?.phone || payment.phone,
       lastAttemptAt: order.stk?.lastAttemptAt || new Date(),
+      failureType: succeeded ? '' : interpreted.type,
     };
 
     if (succeeded) {
       order.paymentStatus = 'confirmed';
       order.verifiedAt = new Date();
+      order.rejectionReason = '';
       order.mpesaCode = MpesaReceiptNumber || order.mpesaCode;
       order.mpesaMessage = order.mpesaMessage || `M-Pesa STK Push — Receipt ${MpesaReceiptNumber}`;
     } else {
-      order.rejectionReason = ResultDesc || 'M-Pesa payment was not completed';
+      // THE FIX — this used to be missing entirely, so a failed payment left
+      // order.paymentStatus stuck at 'pending_verification' forever, making
+      // a wrong-PIN/insufficient-balance order indistinguishable from a
+      // legitimate order still awaiting manual verification. Now it's
+      // explicitly marked 'rejected' the instant M-Pesa says no, and the
+      // buyer gets the exact reason instead of raw Safaricom text.
+      order.paymentStatus = 'rejected';
+      order.rejectionReason = interpreted.message;
     }
     await order.save();
 
@@ -229,6 +258,11 @@ const checkPaymentStatus = asyncHandler(async (req, res) => {
     success: true,
     paymentStatus: order.paymentStatus, // pending_verification | confirmed | rejected
     stkStatus: order.stk?.status || '', // '' | queued | success | failed
+    // NEW — machine-readable reason ('wrong_pin' | 'insufficient_funds' |
+    // 'cancelled' | 'timeout' | ...) so the frontend can branch on it
+    // (e.g. show a "top up" CTA for insufficient_funds) instead of only
+    // string-matching rejectionReason.
+    stkFailureType: order.stk?.failureType || '',
     orderNumber: order.orderNumber,
     orderId: order._id,
     rejectionReason: order.rejectionReason || '',

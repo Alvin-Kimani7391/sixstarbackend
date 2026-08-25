@@ -21,10 +21,13 @@ const {
   suspendProduct,
   getPendingPaymentOrders,
   verifyOrderPayment,
+  getStkPaymentIssues,   // NEW
+  recheckStkPayment,     // NEW
+  forceCancelStkOrder,   // NEW
   getAllUsers,
   setUserStatus,
-  getEarningsSummary,   // <-- add
-  getEarningsOrders,    // <-- add
+  getEarningsSummary,
+  getEarningsOrders,
 } = require('../controllers/adminController');
 
 const { getAllAdsAdmin } = require('../controllers/adController');
@@ -140,10 +143,17 @@ router.patch('/flash-sales/:id/reject', rejectFlashSale);
 // ============================================================
 // Orders
 // ============================================================
+// ============================================================
+// Orders
+// ============================================================
 router.get('/orders', getAllOrdersAdmin);
 router.get('/orders/pending-payment', getPendingPaymentOrders);
 router.patch('/orders/:id/verify-payment', verifyOrderPayment);
 
+// STK Push issues — NEW
+router.get('/orders/stk-issues', getStkPaymentIssues);
+router.patch('/orders/:id/stk-recheck', recheckStkPayment);
+router.patch('/orders/:id/stk-cancel', forceCancelStkOrder);
 
 // ============================================================
 // Earnings
