@@ -480,7 +480,10 @@ function orderConfirmationTemplate({ order, buyerName }) {
     ${infoCard([
       ['Order Number', order.orderNumber],
       ['Order Date', fmtDate(order.createdAt || Date.now())],
-      ['Payment Status', 'Awaiting verification'],
+      [
+      'Payment Status',
+      order.paymentMethod === 'stk' ? 'Confirmed — Paid via M-Pesa' : 'Awaiting verification',
+    ],
     ])}
     <h3 style="margin:0 0 4px;font-size:14px;color:${COLORS.ink};">Your Items</h3>
     ${orderItemsTable(order.items)}
@@ -521,7 +524,9 @@ function newOrderSellerTemplate({ order, sellerName, items }) {
     ${orderItemsTable(items)}
     ${button(manageUrl, 'View Order in Dashboard')}
     <p style="margin:0;font-size:12px;color:${COLORS.muted};">
-      Prepare these items for dispatch once payment is verified by our team.
+      ${order.paymentMethod === 'stk'
+        ? 'Payment has already been confirmed via M-Pesa — please prepare these items for dispatch.'
+        : 'Prepare these items for dispatch once payment is verified by our team.'}
     </p>
   `;
 

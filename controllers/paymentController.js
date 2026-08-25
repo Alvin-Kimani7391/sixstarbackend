@@ -1,6 +1,7 @@
 const asyncHandler = require('express-async-handler');
 const Order = require('../models/Order');
 const Payment = require('../models/Payment');
+const { sendOrderEmails } = require('./orderController');
 const safeSendEmail = require('../utils/safeSendEmail');
 const getAdminEmails = require('../utils/getAdminEmails');
 const { paymentDecisionTemplate, stkPaymentReceivedAdminTemplate } = require('../utils/emailTemplates');
@@ -166,6 +167,18 @@ const handleCallback = asyncHandler(async (req, res) => {
     await order.save();
 
     if (succeeded && order.buyer?.email) {
+      // NEW — this is the buyer "order confirmation" + seller "new order,
+      // prepare for dispatch" emails that used to fire prematurely at order
+      // CREATION time (see orderController.js's createOrder). For STK orders
+      // they now fire HERE instead — only once payment is actually confirmed.
+      // skipAdminVerificationAlert: true because the "needs verification"
+      // admin email doesn't apply here — this order is already confirmed,
+      // and the stkPaymentReceivedAdminTemplate email below covers admin
+      // instead, with accurate "already paid" language.
+      sendOrderEmails(order, order.buyer, { skipAdminVerificationAlert: true }).catch((err) =>
+        console.error('STK order confirmation email dispatch failed:', err)
+      );
+
       safeSendEmail(
         {
           to: order.buyer.email,
@@ -189,8 +202,10 @@ const handleCallback = asyncHandler(async (req, res) => {
         );
       });
     }
-    // Deliberately no email on failure — the buyer is still on the checkout
-    // page and sees it live via the status-polling endpoint below.
+    // Deliberately no email at all on failure/cancellation — the buyer is
+    // still on the checkout page and sees it live via the status-polling
+    // endpoint. Sellers and admin never hear about an order that was never
+    // actually paid for.
   } catch (err) {
     console.error('PayHero callback processing error:', err);
   }

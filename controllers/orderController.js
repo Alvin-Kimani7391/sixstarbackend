@@ -71,27 +71,29 @@ async function resolveLineCommission(categoryId, unitPrice) {
   return { rate, commissionAmountPerUnit, sellerPayoutPerUnit };
 }
 
-// @desc    Buyer places an order and pastes their M-Pesa confirmation message
-// @route   POST /api/orders
-// @access  Private (buyer)
-// @desc    Buyer places an order and pastes their M-Pesa confirmation message
+// @desc    Buyer places an order — either 'manual' (pastes an M-Pesa
+//          confirmation SMS that already happened) or 'stk' (order is
+//          created unpaid; POST /api/payments/initiate-stk fires the actual
+//          M-Pesa prompt right after, and paymentController.js's webhook
+//          confirms it later).
 // @route   POST /api/orders
 // @access  Private (buyer)
 const createOrder = asyncHandler(async (req, res) => {
   const { items, shippingAddress, mpesaMessage, agentCode, transportFee, paymentMethod } = req.body;
-const method = paymentMethod === 'stk' ? 'stk' : 'manual';
+  const method = paymentMethod === 'stk' ? 'stk' : 'manual';
 
-if (!items || items.length === 0) {
-  res.status(400);
-  throw new Error('Order must contain at least one item');
-}
-// Manual payment still requires the pasted M-Pesa SMS up front. STK orders
-// are created "unpaid" — payment is initiated separately via
-// POST /api/payments/initiate-stk right after this order exists.
-if (method === 'manual' && (!mpesaMessage || mpesaMessage.trim().length < 10)) {
-  res.status(400);
-  throw new Error('Please paste your full M-Pesa confirmation message');
-}
+  if (!items || items.length === 0) {
+    res.status(400);
+    throw new Error('Order must contain at least one item');
+  }
+  // Manual payment still requires the pasted M-Pesa SMS up front. STK orders
+  // are created "unpaid" — payment is initiated separately via
+  // POST /api/payments/initiate-stk right after this order exists.
+  if (method === 'manual' && (!mpesaMessage || mpesaMessage.trim().length < 10)) {
+    res.status(400);
+    throw new Error('Please paste your full M-Pesa confirmation message');
+  }
+
   // ---------------- PASS 1: validate everything, mutate nothing ----------------
   let itemsTotal = 0;
   let wholesaleDeliveryTotal = 0;
@@ -369,8 +371,8 @@ if (method === 'manual' && (!mpesaMessage || mpesaMessage.trim().length < 10)) {
     buyer: req.user._id,
     items: orderItems,
     totalAmount,
-    paymentMethod: method,                                   // NEW
-  mpesaMessage: method === 'manual' ? mpesaMessage : '',    // NEW
+    paymentMethod: method,
+    mpesaMessage: method === 'manual' ? mpesaMessage : '',
     deliveryFee: deliveryFeeTotal,
     deliveryDetails: {
       transportFee: retailTransportFee,
@@ -378,7 +380,6 @@ if (method === 'manual' && (!mpesaMessage || mpesaMessage.trim().length < 10)) {
       notes: deliveryNotes,
     },
     shippingAddress,
-    
     paymentStatus: 'pending_verification',
     agent: agentDoc ? agentDoc._id : null,
     agentCode: agentDoc ? agentDoc.code : '',
@@ -393,16 +394,40 @@ if (method === 'manual' && (!mpesaMessage || mpesaMessage.trim().length < 10)) {
 
   res.status(201).json({
     success: true,
-    message: 'Order placed. Your payment will be verified shortly.',
+    message:
+      method === 'stk'
+        ? 'Order created. Complete the M-Pesa prompt to confirm your order.'
+        : 'Order placed. Your payment will be verified shortly.',
     order,
   });
 
-  sendOrderEmails(order, req.user).catch((err) =>
-    console.error('createOrder email dispatch failed:', err)
-  );
+  // STK orders are NOT paid yet at this point — the buyer hasn't even seen
+  // the M-Pesa prompt yet, let alone entered a PIN. Emailing "order placed"
+  // to the buyer and "new order, prepare for dispatch" to sellers here would
+  // tell everyone a sale happened before we actually know if it did.
+  //
+  // Manual orders DO get emailed immediately — the buyer already pasted a
+  // completed M-Pesa confirmation, so there's a real transaction to react to.
+  //
+  // STK's buyer/seller emails instead fire from paymentController.js's
+  // handleCallback, and ONLY on a successful webhook — see that file.
+  if (method === 'manual') {
+    sendOrderEmails(order, req.user).catch((err) =>
+      console.error('createOrder email dispatch failed:', err)
+    );
+  }
 });
 
-async function sendOrderEmails(order, buyer) {
+// Sends the buyer confirmation, per-seller "new order" emails, and (for
+// manual orders only) the admin "needs payment verification" alert.
+//
+// options.skipAdminVerificationAlert: set true when calling this for an STK
+// order that PayHero's webhook already confirmed — that order never needs
+// manual verification, so the "needs verification" admin email would be
+// actively wrong. paymentController.js sends a different, accurate
+// "already confirmed, no action needed" admin email instead in that case
+// (see stkPaymentReceivedAdminTemplate).
+async function sendOrderEmails(order, buyer, { skipAdminVerificationAlert = false } = {}) {
   // Every order email below uses sender: 'info' — order confirmations,
   // seller notifications, and admin alerts are review/status notifications,
   // not OTP/account-security codes.
@@ -438,19 +463,24 @@ async function sendOrderEmails(order, buyer) {
     );
   }
 
-  // 3) Admin alert — payment needs verification
-  const adminEmails = await getAdminEmails();
-  adminEmails.forEach((to) => {
-    safeSendEmail(
-      {
-        to,
-        subject: `New Order Needs Payment Verification - ${order.orderNumber}`,
-        html: newOrderAdminTemplate({ order, buyerName: buyer.name }),
-        sender: 'info',
-      },
-      'Admin new-order alert'
-    );
-  });
+  // 3) Admin alert — payment needs verification. Skipped for STK orders,
+  // which are already confirmed by the time this fires and get a separate,
+  // accurate "already paid, no action needed" email instead (see
+  // stkPaymentReceivedAdminTemplate in paymentController.js).
+  if (!skipAdminVerificationAlert) {
+    const adminEmails = await getAdminEmails();
+    adminEmails.forEach((to) => {
+      safeSendEmail(
+        {
+          to,
+          subject: `New Order Needs Payment Verification - ${order.orderNumber}`,
+          html: newOrderAdminTemplate({ order, buyerName: buyer.name }),
+          sender: 'info',
+        },
+        'Admin new-order alert'
+      );
+    });
+  }
 }
 
 // @desc    Buyer views their own order history
@@ -833,4 +863,5 @@ module.exports = {
   updateOrderStatus,
   cancelOrder,
   getAdminEmails,
+  sendOrderEmails, // NEW — reused by paymentController.js on confirmed STK payments
 };
