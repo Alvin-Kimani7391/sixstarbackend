@@ -49,7 +49,7 @@
 const FRONTEND_URL = 'https://sixstarsuppliers.com';
 const ADMIN_URL = `${FRONTEND_URL}/site/admin.html`;
 // ASSUMED base for seller-facing pages — adjust if your folder/file names differ.
-const SELLER_URL = `${FRONTEND_URL}/six-star-suppliers/login.html`;
+const SELLER_URL = `${FRONTEND_URL}/six-star-suppliers`;
 const BRAND_NAME = 'Six Star Suppliers';
 
 // Shown on OTP / password-reset / any "you requested this" security email,
