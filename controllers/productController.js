@@ -50,8 +50,9 @@ async function notifyAdminsProductPending(product, sellerName) {
 // an exact match on a parent or mid-level category id would return nothing.
 // This widens a category filter to "this category, or any category nested
 // under it, at any depth," so clicking a top-level or mid-level category
-// (from the mega-menu, drawer accordion, or the product.html cascade filter)
-// shows every product underneath it immediately, with no narrowing required.
+// (from the mega-menu, drawer accordion, category-explore page, or the
+// product.html cascade filter) shows every product underneath it immediately,
+// with no narrowing required.
 // ---------------------------------------------------------------------------
 async function getCategoryAndDescendantIds(categoryId) {
   const ids = [categoryId];
@@ -386,8 +387,8 @@ const createProduct = asyncHandler(async (req, res) => {
   // --- Shop auto-attach (silent) ---
   // If this seller has an APPROVED shop, the new product is automatically tied
   // to it. No client input is trusted for this — it's derived purely from the
-  // seller's own shop status server-side. Sellers with no shop, or a shop
-  // that's pending/rejected/suspended, simply get shop: null (today's behavior).
+  // seller's own shop status server-side. Sellers with no shop (or a shop
+  // that's pending/rejected/suspended) simply get shop: null (today's behavior).
   const approvedShop = await getApprovedShopForSeller(req.user._id);
 
   const images = req.files.map((file) => file.path);
@@ -663,6 +664,9 @@ const getProducts = asyncHandler(async (req, res) => {
     sellerRole, // 'wholesaler' | 'retailer' — lets the storefront show "Wholesale" sections
     freeDelivery, // 'true' — powers the "Free Delivery Wholesale Products" section
     shop, // shop id — lets a shop's own storefront page filter to just its products
+    discountOnly, // 'true' — only products with an active discountPercent > 0
+    minRating, // 1-5 — only products with ratingsAverage >= this (used by the
+    // "★★★★ & above" style rating filter on category-explore.html)
   } = req.query;
 
   const filter = { status: 'active', isActive: true, finalPrice: { $ne: null } };
@@ -687,6 +691,20 @@ const getProducts = asyncHandler(async (req, res) => {
     filter.sellerRole = 'wholesaler';
     filter.deliveryType = 'heavy';
     filter.freeDelivery = true;
+  }
+
+  // "Show only discounted items" toggle — any product currently carrying a
+  // positive discountPercent (displayPrice < finalPrice).
+  if (discountOnly === 'true') {
+    filter.discountPercent = { $gt: 0 };
+  }
+
+  // "X stars & above" rating filter.
+  if (minRating !== undefined && minRating !== '') {
+    const ratingNum = Number(minRating);
+    if (Number.isFinite(ratingNum) && ratingNum > 0) {
+      filter.ratingsAverage = { $gte: ratingNum };
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -732,15 +750,31 @@ const getProducts = asyncHandler(async (req, res) => {
     if (maxPrice) filter.finalPrice.$lte = Number(maxPrice);
   }
 
-  // Optional attribute filtering, e.g. ?attributes={"<brandAttrId>":"Nike"}
-  // Only filters product-level attributes; variant-level (Size/Color) filtering
-  // is a follow-up once the storefront UI for it exists.
+  // ---------------------------------------------------------------------
+  // Optional attribute filtering, e.g.
+  //   ?attributes={"<brandAttrId>":"Nike"}
+  //   ?attributes={"<brandAttrId>":["Nike","Samsung"],"<genderAttrId>":"Unisex"}
+  //
+  // Each attribute id maps to either a single value (exact match) or an
+  // array of values (OR'd together via $in — e.g. a Brand checkbox group
+  // where the shopper ticked more than one brand). Different attribute ids
+  // are AND'd together (checking "Nike" OR "Samsung" for Brand, AND
+  // "Unisex" for Gender). Only filters product-level attributes; variant-
+  // level (Size/Color) filtering is a follow-up once there's a query path
+  // for it against ProductVariant.
+  // ---------------------------------------------------------------------
   if (attributes) {
     try {
       const attrFilter = JSON.parse(attributes);
-      const conditions = Object.entries(attrFilter).map(([attrId, value]) => ({
-        attributes: { $elemMatch: { attribute: attrId, value } },
-      }));
+      const conditions = Object.entries(attrFilter)
+        .filter(([, value]) => {
+          if (Array.isArray(value)) return value.length > 0;
+          return value !== undefined && value !== null && value !== '';
+        })
+        .map(([attrId, value]) => {
+          const matchValue = Array.isArray(value) ? { $in: value } : value;
+          return { attributes: { $elemMatch: { attribute: attrId, value: matchValue } } };
+        });
       if (conditions.length) filter.$and = (filter.$and || []).concat(conditions);
     } catch (e) {
       /* ignore malformed filter rather than failing the whole request */
@@ -802,21 +836,6 @@ const getProductById = asyncHandler(async (req, res) => {
   res.json({ success: true, product });
 });
 
-
-
-/**
- * ADD THIS to backend/controllers/productController.js
- * -----------------------------------------------------------------------
- * Paste the function below anywhere among your other exported controllers
- * (e.g. right after getProductById), and add `getProductSuggestions` to
- * the module.exports list at the bottom of the file.
- *
- * Reuses the same escapeRegex() helper and 'active'/'isActive' filtering
- * your existing getProducts() already uses, just trimmed down to a fast,
- * small-payload response suited for calling on every keystroke.
- * -----------------------------------------------------------------------
- */
-
 // @desc    Lightweight autocomplete suggestions for the search box —
 //          matching product names + matching categories, capped small
 //          so it's cheap enough to call on every keystroke (debounced
@@ -852,23 +871,6 @@ const getProductSuggestions = asyncHandler(async (req, res) => {
     categories: categories.map((c) => ({ id: c._id, name: c.name, slug: c.slug })),
   });
 });
-
-// Then add getProductSuggestions to module.exports, e.g.:
-//
-// module.exports = {
-//   createProduct,
-//   updateProduct,
-//   submitProductForReview,
-//   getMyProducts,
-//   deleteProduct,
-//   getProducts,
-//   getProductById,
-//   getProductSuggestions,   // <-- add this line
-//   trackProductViewCount,
-//   getMyProductAnalytics,
-// };
-
-
 
 // ---------------- ANALYTICS ----------------
 
