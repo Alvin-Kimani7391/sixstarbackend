@@ -16,6 +16,7 @@ const {
 } = require('../utils/emailTemplates');
 const { getCategoryAttributeDefs } = require('./categoryAttributeController');
 const { resolveCategoryCommissionRate } = require('./categoryController');
+const { resolveTransactionFee } = require('./transactionFeeController');
 
 // Mirrors SS_CART.resolveUnitPrice on the frontend, but this is the copy that
 // actually decides what gets charged — the client-side one is just a preview.
@@ -275,6 +276,32 @@ const createOrder = asyncHandler(async (req, res) => {
     }
   }
 
+  // ---------------- Seller transaction fees (NEW) ----------------
+  // Tiered, admin-configurable flat fee charged to each seller based on the
+  // buyer-facing subtotal of THEIR OWN items within this order (one fee per
+  // seller per order — a real payment-processor fee scales with the size of
+  // a single settlement, not with each individual line item). Flash Sale
+  // lines are included in a seller's subtotal here too, since they're still
+  // real money moving through the same settlement.
+  const sellerSubtotals = new Map(); // sellerId string -> subtotal (buyer-facing)
+  for (const { product, unitPrice, quantity } of prepared) {
+    const sellerId = product.seller.toString();
+    sellerSubtotals.set(sellerId, (sellerSubtotals.get(sellerId) || 0) + unitPrice * quantity);
+  }
+
+  const sellerFees = [];
+  for (const [sellerId, subtotal] of sellerSubtotals.entries()) {
+    const { fee, tier } = await resolveTransactionFee(subtotal);
+    sellerFees.push({
+      seller: sellerId,
+      subtotal,
+      transactionFee: fee,
+      tier: tier
+        ? { id: tier.id, amountFrom: tier.amountFrom, amountTo: tier.amountTo, label: tier.label }
+        : { id: null, amountFrom: null, amountTo: null, label: '' },
+    });
+  }
+
   // ---------------- PASS 2: everything validated — now commit stock + build order ----------------
   const orderItems = prepared.map(
     ({
@@ -384,6 +411,7 @@ const createOrder = asyncHandler(async (req, res) => {
     agent: agentDoc ? agentDoc._id : null,
     agentCode: agentDoc ? agentDoc.code : '',
     commissionAmount,
+    sellerFees, // NEW — per-seller tiered transaction fees for this order
   });
 
   if (agentDoc) {
@@ -555,27 +583,35 @@ const getSellerOrders = asyncHandler(async (req, res) => {
     .populate('buyer', 'name phone')
     .sort('-createdAt');
 
-  const filtered = orders.map((order) => ({
-    _id: order._id,
-    orderNumber: order.orderNumber,
-    orderStatus: order.orderStatus,
-    paymentStatus: order.paymentStatus,
-    createdAt: order.createdAt,
-    buyer: order.buyer,
-    shippingAddress: order.shippingAddress,
-    items: order.items.filter((i) => i.seller.toString() === req.user._id.toString()),
-  }));
+  const filtered = orders.map((order) => {
+    const myFee = (order.sellerFees || []).find((f) => f.seller.toString() === req.user._id.toString());
+    return {
+      _id: order._id,
+      orderNumber: order.orderNumber,
+      orderStatus: order.orderStatus,
+      paymentStatus: order.paymentStatus,
+      createdAt: order.createdAt,
+      buyer: order.buyer,
+      shippingAddress: order.shippingAddress,
+      items: order.items.filter((i) => i.seller.toString() === req.user._id.toString()),
+      // NEW — this seller's own transaction fee on this order, so the Orders
+      // list/detail views can show it alongside the item breakdown if desired.
+      transactionFee: myFee ? myFee.transactionFee : 0,
+      transactionFeeTier: myFee ? myFee.tier : null,
+    };
+  });
 
   res.json({ success: true, count: filtered.length, orders: filtered });
 });
 
 // ===================================================================
 // @desc    Seller's own earnings dashboard — total sales, marketplace
-//          commission taken, net payout, a 30-day trend, and top/least
-//          selling products. Mirrors the admin order-detail commission
-//          math (see orderItemSchema in models/Order.js) but scoped to
-//          just this seller's own line items and aggregated server-side
-//          so the dashboard stays fast even with a large order history.
+//          commission taken, tiered transaction fees charged, net payout,
+//          a 30-day trend, and top/least selling products. Mirrors the
+//          admin order-detail commission math (see orderItemSchema in
+//          models/Order.js) but scoped to just this seller's own line
+//          items and aggregated server-side so the dashboard stays fast
+//          even with a large order history.
 //
 //          Only lines from orders whose payment is 'confirmed' AND whose
 //          orderStatus isn't 'cancelled' count toward the seller's real
@@ -584,6 +620,11 @@ const getSellerOrders = asyncHandler(async (req, res) => {
 //          separately as "pending" figures so sellers can still see
 //          what's in the pipeline without it being double-counted as
 //          confirmed income.
+//
+//          Net payout = sum of item-level sellerPayout (unit price minus
+//          marketplace commission) MINUS this seller's tiered transaction
+//          fee on each order (stored per-order in Order.sellerFees, not
+//          per item — see sellerFeeSchema in models/Order.js).
 // @route   GET /api/orders/my-earnings
 // @access  Private (wholesaler, retailer)
 // ===================================================================
@@ -596,14 +637,12 @@ const getMyEarnings = asyncHandler(async (req, res) => {
   since.setDate(since.getDate() - 29);
 
   const pipeline = [
-    // Cheap pre-filter on the indexed top-level array field before unwinding,
-    // so we're not unwinding every order in the collection.
-    { $match: { 'items.seller': sellerId } },
-    { $unwind: '$items' },
-    { $match: { 'items.seller': sellerId } },
+    // Cheap pre-filter before unwinding — an order qualifies if this seller
+    // has either an item or a resolved transaction fee entry on it (in
+    // practice these always go together, but this keeps the match honest).
+    { $match: { $or: [{ 'items.seller': sellerId }, { 'sellerFees.seller': sellerId }] } },
     {
       $addFields: {
-        lineRevenue: { $multiply: ['$items.priceAtPurchase', '$items.quantity'] },
         isConfirmed: {
           $and: [{ $eq: ['$paymentStatus', 'confirmed'] }, { $ne: ['$orderStatus', 'cancelled'] }],
         },
@@ -612,29 +651,33 @@ const getMyEarnings = asyncHandler(async (req, res) => {
     },
     {
       $facet: {
-        // ---- Confirmed, real earnings ----
+        // ---- Confirmed, real earnings (item-level) ----
         totals: [
-          { $match: { isConfirmed: true } },
+          { $unwind: '$items' },
+          { $match: { 'items.seller': sellerId, isConfirmed: true } },
+          { $addFields: { lineRevenue: { $multiply: ['$items.priceAtPurchase', '$items.quantity'] } } },
           {
             $group: {
               _id: null,
               totalRevenue: { $sum: '$lineRevenue' },
               totalCommission: { $sum: '$items.commissionAmount' },
-              totalPayout: { $sum: '$items.sellerPayout' },
+              totalGrossPayout: { $sum: '$items.sellerPayout' },
               totalUnitsSold: { $sum: '$items.quantity' },
               orderIds: { $addToSet: '$_id' },
             },
           },
         ],
         // ---- Still awaiting M-Pesa confirmation — shown separately, never
-        // folded into the confirmed totals above ----
+        // folded into the confirmed totals above (item-level) ----
         pending: [
-          { $match: { isPending: true } },
+          { $unwind: '$items' },
+          { $match: { 'items.seller': sellerId, isPending: true } },
+          { $addFields: { lineRevenue: { $multiply: ['$items.priceAtPurchase', '$items.quantity'] } } },
           {
             $group: {
               _id: null,
               pendingRevenue: { $sum: '$lineRevenue' },
-              pendingPayout: { $sum: '$items.sellerPayout' },
+              pendingGrossPayout: { $sum: '$items.sellerPayout' },
               orderIds: { $addToSet: '$_id' },
             },
           },
@@ -642,30 +685,46 @@ const getMyEarnings = asyncHandler(async (req, res) => {
         // ---- Per-product breakdown (confirmed sales only), used for both
         // the top-sellers and least-sellers lists on the frontend ----
         byProduct: [
-          { $match: { isConfirmed: true } },
+          { $unwind: '$items' },
+          { $match: { 'items.seller': sellerId, isConfirmed: true } },
           {
             $group: {
               _id: '$items.product',
               name: { $first: '$items.name' },
               image: { $first: '$items.image' },
               unitsSold: { $sum: '$items.quantity' },
-              revenue: { $sum: '$lineRevenue' },
+              revenue: { $sum: { $multiply: ['$items.priceAtPurchase', '$items.quantity'] } },
               commission: { $sum: '$items.commissionAmount' },
               payout: { $sum: '$items.sellerPayout' },
             },
           },
           { $sort: { unitsSold: -1 } },
         ],
-        // ---- Daily trend, last 30 days (confirmed sales only) ----
+        // ---- Daily trend, last 30 days (confirmed sales only, item-level) ----
         dailyTrend: [
-          { $match: { isConfirmed: true, createdAt: { $gte: since } } },
+          { $unwind: '$items' },
+          { $match: { 'items.seller': sellerId, isConfirmed: true, createdAt: { $gte: since } } },
           {
             $group: {
               _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-              revenue: { $sum: '$lineRevenue' },
+              revenue: { $sum: { $multiply: ['$items.priceAtPurchase', '$items.quantity'] } },
               payout: { $sum: '$items.sellerPayout' },
             },
           },
+        ],
+        // ---- Transaction fees (NEW) — unwound from the order-level
+        // sellerFees array separately from the item facets above, so a fee
+        // isn't accidentally multiplied by however many line items that
+        // order happened to have. ----
+        txnFeesConfirmed: [
+          { $unwind: '$sellerFees' },
+          { $match: { 'sellerFees.seller': sellerId, isConfirmed: true } },
+          { $group: { _id: null, totalFees: { $sum: '$sellerFees.transactionFee' } } },
+        ],
+        txnFeesPending: [
+          { $unwind: '$sellerFees' },
+          { $match: { 'sellerFees.seller': sellerId, isPending: true } },
+          { $group: { _id: null, totalFees: { $sum: '$sellerFees.transactionFee' } } },
         ],
       },
     },
@@ -676,15 +735,17 @@ const getMyEarnings = asyncHandler(async (req, res) => {
   const totals = (result?.totals || [])[0] || {
     totalRevenue: 0,
     totalCommission: 0,
-    totalPayout: 0,
+    totalGrossPayout: 0,
     totalUnitsSold: 0,
     orderIds: [],
   };
   const pending = (result?.pending || [])[0] || {
     pendingRevenue: 0,
-    pendingPayout: 0,
+    pendingGrossPayout: 0,
     orderIds: [],
   };
+  const txnFeesConfirmed = (result?.txnFeesConfirmed || [])[0]?.totalFees || 0;
+  const txnFeesPending = (result?.txnFeesPending || [])[0]?.totalFees || 0;
   const byProduct = result?.byProduct || [];
 
   const topProducts = byProduct.slice(0, 5);
@@ -707,24 +768,111 @@ const getMyEarnings = asyncHandler(async (req, res) => {
 
   const confirmedOrderCount = (totals.orderIds || []).length;
 
+  // Net payout = gross seller payout (unit price minus marketplace
+  // commission, summed across items) MINUS the tiered transaction fees
+  // charged against this seller for those same orders.
+  const totalPayout = (totals.totalGrossPayout || 0) - txnFeesConfirmed;
+  const pendingPayout = (pending.pendingGrossPayout || 0) - txnFeesPending;
+
   res.json({
     success: true,
     totalRevenue: totals.totalRevenue || 0,
     totalCommission: totals.totalCommission || 0,
-    totalPayout: totals.totalPayout || 0,
+    totalTransactionFees: txnFeesConfirmed,
+    totalPayout,
     totalUnitsSold: totals.totalUnitsSold || 0,
     confirmedOrderCount,
-    averageOrderValue: confirmedOrderCount ? Math.round((totals.totalPayout || 0) / confirmedOrderCount) : 0,
+    averageOrderValue: confirmedOrderCount ? Math.round(totalPayout / confirmedOrderCount) : 0,
     // Effective commission rate across everything sold, handy for a single
-    // "you're paying about X% on average" headline figure.
+    // "you're paying about X% on average" headline figure. (Transaction
+    // fees are flat-per-order, not a %, so they get their own figure above
+    // rather than being folded into this rate.)
     effectiveCommissionRate:
       totals.totalRevenue > 0 ? Math.round(((totals.totalCommission || 0) / totals.totalRevenue) * 1000) / 10 : 0,
     pendingRevenue: pending.pendingRevenue || 0,
-    pendingPayout: pending.pendingPayout || 0,
+    pendingTransactionFees: txnFeesPending,
+    pendingPayout,
     pendingOrderCount: (pending.orderIds || []).length,
     topProducts,
     leastProducts,
     dailyTrend,
+  });
+});
+
+// @desc    Seller's own per-order ("per-transaction") earnings breakdown —
+//          each entry is one order containing at least one of this seller's
+//          items, with the items list, gross revenue, marketplace commission,
+//          transaction fee (+ which tier matched at the time), and net payout
+//          for JUST this seller's portion of that order. Powers the
+//          expandable "All transactions" list under the Earnings screen.
+// @route   GET /api/orders/my-earnings/transactions?status=all|confirmed|pending|rejected&page=&limit=
+// @access  Private (wholesaler, retailer)
+const getMyEarningsTransactions = asyncHandler(async (req, res) => {
+  const sellerId = req.user._id;
+  const { status = 'all', page = 1, limit = 10 } = req.query;
+
+  const filter = { 'items.seller': sellerId };
+  if (status === 'confirmed') {
+    filter.paymentStatus = 'confirmed';
+    filter.orderStatus = { $ne: 'cancelled' };
+  } else if (status === 'pending') {
+    filter.paymentStatus = 'pending_verification';
+  } else if (status === 'rejected') {
+    filter.paymentStatus = 'rejected';
+  }
+
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const [orders, total] = await Promise.all([
+    Order.find(filter).sort('-createdAt').skip(skip).limit(Number(limit)),
+    Order.countDocuments(filter),
+  ]);
+
+  const transactions = orders.map((order) => {
+    const myItems = order.items.filter((i) => i.seller.toString() === sellerId.toString());
+    const grossRevenue = myItems.reduce((s, i) => s + i.priceAtPurchase * i.quantity, 0);
+    const commission = myItems.reduce((s, i) => s + (i.commissionAmount || 0), 0);
+    const grossPayout = myItems.reduce((s, i) => s + (i.sellerPayout || 0), 0);
+    const feeEntry = (order.sellerFees || []).find((f) => f.seller.toString() === sellerId.toString());
+    const transactionFee = feeEntry ? feeEntry.transactionFee : 0;
+    const netPayout = grossPayout - transactionFee;
+
+    const isConfirmed = order.paymentStatus === 'confirmed' && order.orderStatus !== 'cancelled';
+    const isPending = order.paymentStatus === 'pending_verification';
+
+    return {
+      orderId: order._id,
+      orderNumber: order.orderNumber,
+      createdAt: order.createdAt,
+      paymentStatus: order.paymentStatus,
+      orderStatus: order.orderStatus,
+      earningsStatus: isConfirmed ? 'confirmed' : isPending ? 'pending' : 'rejected',
+      itemCount: myItems.reduce((s, i) => s + i.quantity, 0),
+      items: myItems.map((i) => ({
+        name: i.name,
+        image: i.image,
+        quantity: i.quantity,
+        unitPrice: i.priceAtPurchase,
+        lineTotal: i.priceAtPurchase * i.quantity,
+        commissionRate: i.commissionRate,
+        commissionAmount: i.commissionAmount,
+        sellerPayout: i.sellerPayout,
+      })),
+      grossRevenue,
+      commission,
+      transactionFee,
+      transactionFeeTier: feeEntry?.tier || null,
+      netPayout,
+    };
+  });
+
+  res.json({
+    success: true,
+    count: transactions.length,
+    total,
+    page: Number(page),
+    pages: Math.ceil(total / Number(limit)),
+    transactions,
   });
 });
 
@@ -809,6 +957,12 @@ const cancelOrder = asyncHandler(async (req, res) => {
   // delivered. Now that Product.stock is correctly decremented on purchase,
   // restoring it here is correct — and we also give the FlashSale its
   // allocation back so those units are buyable again.
+  //
+  // NOTE: a cancelled order's transaction fee (Order.sellerFees) is left as
+  // its original snapshot — it was never charged/settled anywhere (there's
+  // no separate payout ledger being debited), and getMyEarnings already
+  // excludes cancelled orders from both the confirmed and pending totals, so
+  // nothing needs reversing here.
   for (const item of order.items) {
     await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } });
     if (item.variant) {
@@ -860,6 +1014,7 @@ module.exports = {
   getOrderById,
   getSellerOrders,
   getMyEarnings,
+  getMyEarningsTransactions, // NEW
   updateOrderStatus,
   cancelOrder,
   getAdminEmails,

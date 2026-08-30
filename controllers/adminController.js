@@ -4,6 +4,7 @@ const Order = require('../models/Order');
 const Payment = require('../models/Payment');
 const ProductVariant = require('../models/ProductVariant');
 const FlashSale = require('../models/FlashSale');
+const TransactionFeeTier = require('../models/TransactionFeeTier');
 const { User } = require('../models/User');
 const safeSendEmail = require('../utils/safeSendEmail');
 const {
@@ -175,6 +176,7 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
       $addFields: {
         orderMarketplaceCommission: { $sum: '$items.commissionAmount' },
         orderSellerPayout: { $sum: '$items.sellerPayout' },
+        orderTransactionFees: { $sum: '$sellerFees.transactionFee' },
       },
     },
     {
@@ -185,6 +187,7 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
         totalDeliveryFees: { $sum: '$deliveryFee' },
         totalMarketplaceCommission: { $sum: '$orderMarketplaceCommission' },
         totalSellerPayout: { $sum: '$orderSellerPayout' },
+        totalTransactionFees: { $sum: '$orderTransactionFees' },
         totalAgentCommission: { $sum: '$commissionAmount' },
         ordersWithAgent: { $sum: { $cond: [{ $ifNull: ['$agent', false] }, 1, 0] } },
       },
@@ -197,6 +200,7 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
     totalDeliveryFees: 0,
     totalMarketplaceCommission: 0,
     totalSellerPayout: 0,
+    totalTransactionFees: 0,
     totalAgentCommission: 0,
     ordersWithAgent: 0,
   };
@@ -270,6 +274,11 @@ const getEarningsSummary = asyncHandler(async (req, res) => {
     success: true,
     filters: { from: from || null, to: to || null, paymentStatus },
     totals,
+    // Net marketplace earnings now also nets out transaction fees collected
+    // from sellers separately from the commission/agent-payout math — those
+    // fees offset your own payment-processing costs, they aren't "marketplace
+    // profit" in the same sense as commission, so they're broken out on
+    // `totals.totalTransactionFees` rather than folded into this figure.
     netMarketplaceEarnings: (totals.totalMarketplaceCommission || 0) - (totals.totalAgentCommission || 0),
     roleBreakdown,
     topSellers,
@@ -319,6 +328,7 @@ const getEarningsOrders = asyncHandler(async (req, res) => {
     const marketplaceCommission = o.items.reduce((sum, i) => sum + (i.commissionAmount || 0), 0);
     const sellerPayout = o.items.reduce((sum, i) => sum + (i.sellerPayout || 0), 0);
     const agentCommission = o.commissionAmount || 0;
+    const transactionFeesTotal = (o.sellerFees || []).reduce((sum, f) => sum + (f.transactionFee || 0), 0);
 
     return {
       _id: o._id,
@@ -334,6 +344,15 @@ const getEarningsOrders = asyncHandler(async (req, res) => {
       agent: o.agent,
       agentCommission,
       netMarketplaceEarning: marketplaceCommission - agentCommission,
+      // NEW — per-seller tiered transaction fees charged on this order, plus
+      // the order-wide total for a quick glance in the admin table.
+      transactionFeesTotal,
+      sellerFees: (o.sellerFees || []).map((f) => ({
+        seller: f.seller,
+        subtotal: f.subtotal,
+        transactionFee: f.transactionFee,
+        tier: f.tier,
+      })),
       items: o.items.map((i) => ({
         name: i.name,
         seller: i.seller,
@@ -756,6 +775,153 @@ const setUserStatus = asyncHandler(async (req, res) => {
   res.json({ success: true, user });
 });
 
+// ============================================================
+// TRANSACTION FEES (seller-side payment-processing fee ladder — NEW)
+// ------------------------------------------------------------
+// Admin-configurable tiers, e.g.:
+//   KES 1–49      -> 0
+//   KES 50–499    -> 6
+//   KES 500–999   -> 10
+//   KES 1000–1499 -> 15
+//   KES 1500–2499 -> 20
+//   KES 2500+     -> 25   (amountTo left null = open-ended top tier)
+//
+// Every new order resolves and snapshots the fee that applies to each
+// seller's subtotal in that order AT THE TIME it's placed (see
+// resolveTransactionFee usage in orderController.createOrder) — editing the
+// ladder here never rewrites past orders or earnings.
+// ============================================================
+
+// Overlap check for create/update — amountTo === null is treated as +Infinity.
+async function hasTierOverlap(from, to, excludeId) {
+  const upper = to == null ? Infinity : to;
+  const tiers = await TransactionFeeTier.find({
+    isActive: true,
+    ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+  });
+  return tiers.some((t) => {
+    const tUpper = t.amountTo == null ? Infinity : t.amountTo;
+    return from <= tUpper && t.amountFrom <= upper;
+  });
+}
+
+// @desc    Every tier, active or not — the full ladder for the admin screen.
+// @route   GET /api/admin/transaction-fees
+// @access  Private (admin)
+const getAllTiersAdmin = asyncHandler(async (req, res) => {
+  const tiers = await TransactionFeeTier.find().sort('amountFrom');
+  res.json({ success: true, count: tiers.length, tiers });
+});
+
+// @desc    Add a new fee tier.
+// @route   POST /api/admin/transaction-fees
+// @access  Private (admin)
+const createTransactionFeeTier = asyncHandler(async (req, res) => {
+  const { amountFrom, amountTo, fee, label, isActive } = req.body;
+
+  if (amountFrom === undefined || fee === undefined) {
+    res.status(400);
+    throw new Error('amountFrom and fee are required');
+  }
+
+  const from = Number(amountFrom);
+  const to = amountTo === undefined || amountTo === null || amountTo === '' ? null : Number(amountTo);
+  const feeVal = Number(fee);
+
+  if (Number.isNaN(from) || from < 0) {
+    res.status(400);
+    throw new Error('amountFrom must be a valid non-negative number');
+  }
+  if (to !== null && (Number.isNaN(to) || to <= from)) {
+    res.status(400);
+    throw new Error('amountTo must be greater than amountFrom, or left blank for an open-ended top tier');
+  }
+  if (Number.isNaN(feeVal) || feeVal < 0) {
+    res.status(400);
+    throw new Error('fee must be a valid non-negative number');
+  }
+
+  const active = isActive !== undefined ? !!isActive : true;
+  if (active && (await hasTierOverlap(from, to))) {
+    res.status(400);
+    throw new Error(
+      'This range overlaps an existing active tier. Adjust the range or deactivate the conflicting tier first.'
+    );
+  }
+
+  const tier = await TransactionFeeTier.create({
+    amountFrom: from,
+    amountTo: to,
+    fee: feeVal,
+    label: label || '',
+    isActive: active,
+  });
+
+  res.status(201).json({ success: true, tier });
+});
+
+// @desc    Edit an existing fee tier.
+// @route   PATCH /api/admin/transaction-fees/:id
+// @access  Private (admin)
+const updateTransactionFeeTier = asyncHandler(async (req, res) => {
+  const tier = await TransactionFeeTier.findById(req.params.id);
+  if (!tier) {
+    res.status(404);
+    throw new Error('Tier not found');
+  }
+
+  const from = req.body.amountFrom !== undefined ? Number(req.body.amountFrom) : tier.amountFrom;
+  const to =
+    req.body.amountTo === undefined
+      ? tier.amountTo
+      : req.body.amountTo === null || req.body.amountTo === ''
+      ? null
+      : Number(req.body.amountTo);
+  const feeVal = req.body.fee !== undefined ? Number(req.body.fee) : tier.fee;
+  const isActive = req.body.isActive !== undefined ? !!req.body.isActive : tier.isActive;
+
+  if (Number.isNaN(from) || from < 0) {
+    res.status(400);
+    throw new Error('amountFrom must be a valid non-negative number');
+  }
+  if (to !== null && (Number.isNaN(to) || to <= from)) {
+    res.status(400);
+    throw new Error('amountTo must be greater than amountFrom, or left blank for an open-ended top tier');
+  }
+  if (Number.isNaN(feeVal) || feeVal < 0) {
+    res.status(400);
+    throw new Error('fee must be a valid non-negative number');
+  }
+
+  if (isActive && (await hasTierOverlap(from, to, tier._id))) {
+    res.status(400);
+    throw new Error(
+      'This range overlaps an existing active tier. Adjust the range or deactivate the conflicting tier first.'
+    );
+  }
+
+  tier.amountFrom = from;
+  tier.amountTo = to;
+  tier.fee = feeVal;
+  tier.isActive = isActive;
+  if (req.body.label !== undefined) tier.label = req.body.label;
+
+  await tier.save();
+  res.json({ success: true, tier });
+});
+
+// @desc    Delete a fee tier entirely.
+// @route   DELETE /api/admin/transaction-fees/:id
+// @access  Private (admin)
+const deleteTransactionFeeTier = asyncHandler(async (req, res) => {
+  const tier = await TransactionFeeTier.findByIdAndDelete(req.params.id);
+  if (!tier) {
+    res.status(404);
+    throw new Error('Tier not found');
+  }
+  res.json({ success: true, message: 'Tier deleted' });
+});
+
 module.exports = {
   getAllProductsAdmin,
   adminUpdateProduct,
@@ -769,11 +935,16 @@ module.exports = {
   suspendProduct,
   getPendingPaymentOrders,
   verifyOrderPayment,
-  getStkPaymentIssues,   // NEW
-  recheckStkPayment,     // NEW
-  forceCancelStkOrder,   // NEW
+  getStkPaymentIssues,
+  recheckStkPayment,
+  forceCancelStkOrder,
   getAllUsers,
   setUserStatus,
   getEarningsSummary,
   getEarningsOrders,
+  // Transaction fee tiers (NEW)
+  getAllTiersAdmin,
+  createTransactionFeeTier,
+  updateTransactionFeeTier,
+  deleteTransactionFeeTier,
 };

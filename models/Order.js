@@ -29,6 +29,27 @@ const orderItemSchema = new Schema(
   { _id: false }
 );
 
+// One entry per seller present in this order — the tiered transaction fee
+// charged against THAT seller's own buyer-facing subtotal within this order
+// (a real payment-processor fee scales per settlement, not per line item).
+// Snapshotted at order-creation time off whatever TransactionFeeTier ladder
+// is active at that moment, so later admin edits to the ladder never rewrite
+// historical orders/earnings. See controllers/transactionFeeController.js.
+const sellerFeeSchema = new Schema(
+  {
+    seller: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    subtotal: { type: Number, required: true, default: 0 }, // this seller's buyer-facing subtotal in this order
+    transactionFee: { type: Number, required: true, default: 0 },
+    tier: {
+      id: { type: Schema.Types.ObjectId, ref: 'TransactionFeeTier', default: null },
+      amountFrom: { type: Number, default: null },
+      amountTo: { type: Number, default: null },
+      label: { type: String, default: '' },
+    },
+  },
+  { _id: false }
+);
+
 const orderSchema = new Schema(
   {
     orderNumber: { type: String, unique: true, index: true },
@@ -104,6 +125,11 @@ const orderSchema = new Schema(
     agent: { type: Schema.Types.ObjectId, ref: 'Agent', default: null, index: true },
     agentCode: { type: String, default: '' },
     commissionAmount: { type: Number, default: 0 },
+
+    // Per-seller tiered transaction fees for this order — see sellerFeeSchema
+    // above. One entry per distinct seller whose products appear in this
+    // order, each fee resolved against that seller's own subtotal here.
+    sellerFees: { type: [sellerFeeSchema], default: [] },
   },
   { timestamps: true }
 );
@@ -141,6 +167,12 @@ orderSchema.virtual('totalCommission').get(function () {
 
 orderSchema.virtual('totalSellerPayout').get(function () {
   return (this.items || []).reduce((sum, i) => sum + (i.sellerPayout || 0), 0);
+});
+
+// Virtual: sum of every seller's transaction fee on this order (handy for a
+// single "total fees charged on this order" figure in admin views).
+orderSchema.virtual('totalTransactionFees').get(function () {
+  return (this.sellerFees || []).reduce((sum, f) => sum + (f.transactionFee || 0), 0);
 });
 
 orderSchema.set('toJSON', { virtuals: true });

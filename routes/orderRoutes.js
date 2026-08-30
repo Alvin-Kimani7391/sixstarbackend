@@ -7,6 +7,7 @@ const {
   getOrderById,
   getSellerOrders,
   getMyEarnings,
+  getMyEarningsTransactions,
   updateOrderStatus,
   cancelOrder,
 } = require('../controllers/orderController');
@@ -16,10 +17,9 @@ router.post('/', protect, authorize('buyer'), createOrder);
 router.get('/my-orders', protect, authorize('buyer'), getMyOrders);
 router.get('/seller-orders', protect, authorize('wholesaler', 'retailer'), getSellerOrders);
 
-// Seller earnings dashboard (total sales, marketplace commission taken, net
-// payout, 30-day trend, top/least selling products). Static path — MUST be
-// declared before '/:id' below, same reasoning as 'seller-orders'/'my-orders'.
+// Seller earnings dashboard — static paths, MUST be declared before '/:id'.
 router.get('/my-earnings', protect, authorize('wholesaler', 'retailer'), getMyEarnings);
+router.get('/my-earnings/transactions', protect, authorize('wholesaler', 'retailer'), getMyEarningsTransactions);
 
 // Public tracking - MUST come before '/:id' or Express would treat "track" as an :id value
 router.get('/track', trackOrderPublic);

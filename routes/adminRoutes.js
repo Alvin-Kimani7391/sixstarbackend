@@ -21,13 +21,17 @@ const {
   suspendProduct,
   getPendingPaymentOrders,
   verifyOrderPayment,
-  getStkPaymentIssues,   // NEW
-  recheckStkPayment,     // NEW
-  forceCancelStkOrder,   // NEW
+  getStkPaymentIssues,
+  recheckStkPayment,
+  forceCancelStkOrder,
   getAllUsers,
   setUserStatus,
   getEarningsSummary,
   getEarningsOrders,
+  getAllTiersAdmin,
+  createTransactionFeeTier,
+  updateTransactionFeeTier,
+  deleteTransactionFeeTier,
 } = require('../controllers/adminController');
 
 const { getAllAdsAdmin } = require('../controllers/adController');
@@ -68,6 +72,8 @@ const {
 
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages, uploadLegalDocument } = require('../middleware/uploadMiddleware');
+
+
 
 // ---------------------------------------------------------------------------
 // SECURITY: everything below this line is admin-only. Nothing in this router
@@ -161,6 +167,17 @@ router.patch('/orders/:id/stk-cancel', forceCancelStkOrder);
 router.get('/earnings/summary', getEarningsSummary);
 router.get('/earnings/orders', getEarningsOrders);
 
+
+// ============================================================
+// Transaction Fees (seller-side payment-processing fee ladder)
+// ============================================================
+
+
+
+router.get('/transaction-fees', getAllTiersAdmin);
+router.post('/transaction-fees', createTransactionFeeTier);
+router.patch('/transaction-fees/:id', updateTransactionFeeTier);
+router.delete('/transaction-fees/:id', deleteTransactionFeeTier);
 // ============================================================
 // Ads
 // ============================================================

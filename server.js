@@ -81,6 +81,9 @@ app.use('/api/payments', require('./routes/paymentRoutes')); // NEW — PayHero 
 
 
 app.use('/api/contact', require('./routes/contactRoutes')); // NEW — public Contact Us form
+app.use('/api/transaction-fees', require('./routes/transactionFeeRoutes'));
+
+
 
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 
