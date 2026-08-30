@@ -15,8 +15,12 @@ const sendContactMessage = asyncHandler(async (req, res) => {
   const name = (req.body.name || '').trim();
   const email = (req.body.email || '').trim();
   const phone = (req.body.phone || '').trim();
+  const inquiryType = (req.body.inquiryType || '').trim();
+  const orderNumber = (req.body.orderNumber || '').trim();
   const subject = (req.body.subject || '').trim();
   const message = (req.body.message || '').trim();
+
+  const VALID_TYPES = ['General Information', 'Order Inquiry', 'Sales and Advertisement', 'Feedback'];
 
   if (!name || !email || !message) {
     res.status(400);
@@ -28,10 +32,20 @@ const sendContactMessage = asyncHandler(async (req, res) => {
     throw new Error('Please provide a valid email address');
   }
 
+  if (inquiryType && !VALID_TYPES.includes(inquiryType)) {
+    res.status(400);
+    throw new Error('Invalid inquiry type');
+  }
+
+  if (inquiryType === 'Order Inquiry' && !orderNumber) {
+    res.status(400);
+    throw new Error('Order number is required for an order inquiry');
+  }
+
   await sendEmail({
     to: SUPPORT_EMAIL,
-    subject: subject ? `Contact Form: ${subject}` : 'New Contact Form Message',
-    html: contactFormEmailTemplate({ name, email, phone, subject, message }),
+    subject: subject ? `Contact Form: ${subject}` : `Contact Form: ${inquiryType || 'New Message'}`,
+    html: contactFormEmailTemplate({ name, email, phone, inquiryType, orderNumber, subject, message }),
     sender: 'info',
   });
 

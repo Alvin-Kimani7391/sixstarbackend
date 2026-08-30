@@ -983,12 +983,14 @@ function agentWelcomeTemplate({ name, code }) {
 /* CONTACT FORM EMAIL                                                */
 /* ================================================================ */
 
-function contactFormEmailTemplate({ name, email, phone, subject, message }) {
+function contactFormEmailTemplate({ name, email, phone, inquiryType, orderNumber, subject, message }) {
   const bodyHtml = `
     ${infoCard([
       ['From', name || 'N/A'],
       ['Email', email || 'N/A'],
       ...(phone ? [['Phone', phone]] : []),
+      ...(inquiryType ? [['Inquiry Type', inquiryType]] : []),
+      ...(orderNumber ? [['Order Number', orderNumber]] : []),
       ...(subject ? [['Subject', subject]] : []),
     ])}
     <div style="background:${COLORS.chip};border-radius:12px;padding:16px 18px;margin:8px 0 4px;">
@@ -1000,9 +1002,9 @@ function contactFormEmailTemplate({ name, email, phone, subject, message }) {
   `;
 
   return baseLayout({
-    preheader: `New contact form message from ${name || 'a visitor'}`,
+    preheader: `New ${inquiryType || 'contact form'} message from ${name || 'a visitor'}`,
     eyebrow: 'Contact Form',
-    title: 'New Message from the Website',
+    title: inquiryType ? `New ${inquiryType} Message` : 'New Message from the Website',
     intro: `Someone submitted the contact form on ${BRAND_NAME}.`,
     bodyHtml,
   });
