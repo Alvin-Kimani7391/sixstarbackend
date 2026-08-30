@@ -978,6 +978,38 @@ function agentWelcomeTemplate({ name, code }) {
   });
 }
 
+
+/* ================================================================ */
+/* CONTACT FORM EMAIL                                                */
+/* ================================================================ */
+
+function contactFormEmailTemplate({ name, email, phone, subject, message }) {
+  const bodyHtml = `
+    ${infoCard([
+      ['From', name || 'N/A'],
+      ['Email', email || 'N/A'],
+      ...(phone ? [['Phone', phone]] : []),
+      ...(subject ? [['Subject', subject]] : []),
+    ])}
+    <div style="background:${COLORS.chip};border-radius:12px;padding:16px 18px;margin:8px 0 4px;">
+      <div style="font-size:12px;font-weight:700;color:${COLORS.muted};text-transform:uppercase;letter-spacing:0.4px;margin-bottom:8px;">
+        Message
+      </div>
+      <div style="font-size:14px;color:${COLORS.ink};line-height:1.7;white-space:pre-wrap;">${message}</div>
+    </div>
+  `;
+
+  return baseLayout({
+    preheader: `New contact form message from ${name || 'a visitor'}`,
+    eyebrow: 'Contact Form',
+    title: 'New Message from the Website',
+    intro: `Someone submitted the contact form on ${BRAND_NAME}.`,
+    bodyHtml,
+  });
+}
+
+
+
 module.exports = {
   // primitives (useful if you build one-off emails later)
   COLORS,
@@ -1030,6 +1062,10 @@ module.exports = {
   shopSubmittedAdminTemplate,
   shopDecisionTemplate,
 
-  // agents
+    // agents
   agentWelcomeTemplate,
+
+  // contact
+  contactFormEmailTemplate,
+
 };

@@ -79,6 +79,9 @@ app.use('/', require('./routes/seoRoutes'));
 
 app.use('/api/payments', require('./routes/paymentRoutes')); // NEW — PayHero STK Push
 
+
+app.use('/api/contact', require('./routes/contactRoutes')); // NEW — public Contact Us form
+
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 
 console.log('MERCHANT FEED EXPORT:', merchantFeedRouter);
