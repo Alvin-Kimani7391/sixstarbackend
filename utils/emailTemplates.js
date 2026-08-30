@@ -1010,7 +1010,60 @@ function contactFormEmailTemplate({ name, email, phone, inquiryType, orderNumber
   });
 }
 
+/* ================================================================ */
+/* STOCK REMINDER EMAILS (NEW)                                       */
+/* ================================================================ */
 
+function stockReminderSellerTemplate({ sellerName, product }) {
+  const manageUrl = `${SELLER_URL}/seller-dashboard.html?tab=analytics&section=manage-stock`; // ASSUMED
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      ${statusBadge('Low Stock', 'warning')}
+    </div>
+    ${infoCard([
+      ['Product', product.name],
+      ['Current Stock', String(product.stock)],
+      ['Your Reminder Threshold', String(product.stockReminderThreshold)],
+    ])}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      This product's stock has dropped to or below the threshold you set. Update the stock quantity
+      as soon as you can so buyers don't run into an out-of-stock item.
+    </p>
+    ${button(manageUrl, 'Update Stock Now', COLORS.warning)}
+  `;
+  return baseLayout({
+    preheader: `${product.name} is running low on stock (${product.stock} left)`,
+    eyebrow: 'Stock Alert',
+    title: 'Low Stock Reminder',
+    intro: `Hi ${sellerName?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+  });
+}
+
+function stockReminderAdminTemplate({ sellerName, sellerEmail, product }) {
+  const viewUrl = `${ADMIN_URL}?section=products&productId=${product._id}`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Seller', sellerName || 'N/A'],
+      ['Seller Email', sellerEmail || 'N/A'],
+      ['Product', product.name],
+      ['Current Stock', String(product.stock)],
+      ['Seller\u2019s Threshold', String(product.stockReminderThreshold)],
+    ])}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      This is a monitoring copy — the seller was just emailed the same low-stock alert. Use this to
+      track whether they restock in time.
+    </p>
+    ${button(viewUrl, 'View Product', COLORS.warning)}
+  `;
+  return baseLayout({
+    preheader: `[Monitor] ${product.name} is low on stock for ${sellerName || 'a seller'}`,
+    eyebrow: 'Admin Alert · Stock Monitor',
+    title: 'Seller Notified of Low Stock',
+    intro: 'A seller-configured low-stock reminder just fired. Copying you in so you can monitor restocking.',
+    bodyHtml,
+  });
+}
 
 module.exports = {
   // primitives (useful if you build one-off emails later)
@@ -1069,5 +1122,9 @@ module.exports = {
 
   // contact
   contactFormEmailTemplate,
+
+    // stock reminders
+  stockReminderSellerTemplate,
+  stockReminderAdminTemplate,
 
 };

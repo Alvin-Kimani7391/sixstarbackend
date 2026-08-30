@@ -8,9 +8,8 @@ const sendEmail = require('../utils/sendEmail');
 const { productSubmittedAdminTemplate } = require('../utils/emailTemplates');
 const { isLeafCategory, getCategoryAttributeDefs } = require('./categoryAttributeController');
 const { getApprovedShopForSeller } = require('./shopController');
+const { checkAndSendStockReminder } = require('../utils/stockReminderService'); // NEW
 
-// Best-effort admin recipient list: explicit env override first, otherwise every
-// user with role "admin".
 async function getAdminEmails() {
   if (process.env.ADMIN_EMAILS) {
     return process.env.ADMIN_EMAILS.split(',').map((s) => s.trim()).filter(Boolean);
@@ -20,13 +19,9 @@ async function getAdminEmails() {
 }
 
 function safeSendEmail(opts, label) {
-  // Brevo errors surface on err.body (see utils/sendEmail.js), not
-  // err.response.body like the old SendGrid SDK did.
   sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.body || err.message));
 }
 
-// Notifies every admin that a product needs review (used for both first-time
-// submission and re-submission after a live product is edited).
 async function notifyAdminsProductPending(product, sellerName) {
   const adminEmails = await getAdminEmails();
   adminEmails.forEach((to) => {
@@ -42,18 +37,6 @@ async function notifyAdminsProductPending(product, sellerName) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Recursively collects a category's own ID plus every descendant category ID
-// underneath it (children, grandchildren, ...). Needed because products are
-// ALWAYS assigned to a LEAF category only (see the isLeafCategory() checks in
-// createProduct/updateProduct below) — so filtering the public storefront by
-// an exact match on a parent or mid-level category id would return nothing.
-// This widens a category filter to "this category, or any category nested
-// under it, at any depth," so clicking a top-level or mid-level category
-// (from the mega-menu, drawer accordion, category-explore page, or the
-// product.html cascade filter) shows every product underneath it immediately,
-// with no narrowing required.
-// ---------------------------------------------------------------------------
 async function getCategoryAndDescendantIds(categoryId) {
   const ids = [categoryId];
   const children = await Category.find({ parentCategory: categoryId }).select('_id');
@@ -64,18 +47,10 @@ async function getCategoryAndDescendantIds(categoryId) {
   return ids;
 }
 
-// Escapes regex special characters in free-text user input before it's
-// dropped into a RegExp — otherwise a search like "iPhone (2023)" would throw
-// or behave unexpectedly.
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// ---------------------------------------------------------------------------
-// Shared validation: given a leaf category plus whatever attributes/variants
-// the seller sent, checks them against that category's attribute rules and
-// returns the shapes ready to save. Throws an Error with `.status` on failure.
-// ---------------------------------------------------------------------------
 function buildCombinationKey(combination) {
   return combination
     .map((c) => `${c.attribute}:${String(c.value).trim().toLowerCase()}`)
@@ -88,7 +63,6 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
   const variantDefs = defs.filter((d) => d.isVariantAttribute);
   const simpleDefs = defs.filter((d) => !d.isVariantAttribute);
 
-  // ---- product-level attributes (Brand, Material, Gender, ...) ----
   const attributes = [];
   for (const def of simpleDefs) {
     const match = (rawAttributes || []).find((a) => String(a.attribute) === String(def._id));
@@ -104,7 +78,6 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
     }
   }
 
-  // ---- variant-defining attributes (Size, Color, ...) ----
   let variants = [];
   let stock = null;
 
@@ -162,22 +135,8 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
   return { attributes, variants, stock, variantDefs, simpleDefs };
 }
 
-// ---------------------------------------------------------------------------
-// Wholesale-only validation: delivery type (simple/heavy), MOQ, quantity-based
-// pricing tiers, and delivery terms.
-//
-//  - Retailers never see any of this — everything is forced back to the
-//    'simple'-equivalent defaults regardless of what was sent.
-//  - Wholesalers always get MOQ + pricing tiers (bulk buying still applies
-//    either way).
-//  - Only when deliveryType === 'heavy' do freeDelivery/deliveryCharge get
-//    validated and saved. deliveryType === 'simple' means "this ships like a
-//    normal retail product" — no special transport terms, the buyer just pays
-//    the regular regional delivery fee at checkout like anyone else.
-// ---------------------------------------------------------------------------
 function validateAndPrepareWholesaleFields(role, body) {
   if (role !== 'wholesaler') {
-    // Retailers: force these back to defaults regardless of what was sent.
     return {
       deliveryType: 'simple',
       minOrderQuantity: 1,
@@ -189,7 +148,6 @@ function validateAndPrepareWholesaleFields(role, body) {
 
   const deliveryType = body.deliveryType === 'simple' ? 'simple' : 'heavy';
 
-  // --- MOQ (applies to every wholesale product, simple or heavy) ---
   let minOrderQuantity = 1;
   if (body.minOrderQuantity !== undefined && body.minOrderQuantity !== '') {
     minOrderQuantity = Number(body.minOrderQuantity);
@@ -200,7 +158,6 @@ function validateAndPrepareWholesaleFields(role, body) {
     }
   }
 
-  // --- Quantity-based pricing tiers (also applies either way) ---
   let pricingTiers = [];
   if (body.pricingTiers !== undefined && body.pricingTiers !== '') {
     let raw;
@@ -234,8 +191,6 @@ function validateAndPrepareWholesaleFields(role, body) {
       return { minQty, price };
     });
 
-    // Sort ascending by quantity, then make sure the price actually drops (or stays flat)
-    // as quantity increases — otherwise the tiers don't make sense as "bulk" pricing.
     pricingTiers.sort((a, b) => a.minQty - b.minQty);
 
     const seenQty = new Set();
@@ -263,7 +218,6 @@ function validateAndPrepareWholesaleFields(role, body) {
     }
   }
 
-  // --- Delivery terms: only meaningful for 'heavy' products ---
   let freeDelivery = false;
   let deliveryCharge = { chargeType: 'fixed', amount: 0, perUnitAmount: 0, notes: '' };
 
@@ -303,14 +257,11 @@ function validateAndPrepareWholesaleFields(role, body) {
         }
         deliveryCharge = { chargeType, amount: 0, perUnitAmount, notes: '' };
       } else {
-        // negotiated
         const notes = (rawCharge.notes || '').toString().trim();
         deliveryCharge = { chargeType, amount: 0, perUnitAmount: 0, notes };
       }
     }
   }
-  // deliveryType === 'simple' -> freeDelivery/deliveryCharge stay at their defaults above;
-  // the product ships like a normal retail item and standard checkout transport fees apply.
 
   return { deliveryType, minOrderQuantity, pricingTiers, freeDelivery, deliveryCharge };
 }
@@ -345,7 +296,6 @@ const createProduct = asyncHandler(async (req, res) => {
     );
   }
 
-  // attributes/variants travel as JSON strings inside the multipart body
   let rawAttributes = [];
   let rawVariants = [];
   try {
@@ -375,7 +325,6 @@ const createProduct = asyncHandler(async (req, res) => {
     }
   }
 
-  // Wholesale-specific fields (no-op / defaults for retailers)
   let wholesale;
   try {
     wholesale = validateAndPrepareWholesaleFields(req.user.role, req.body);
@@ -384,14 +333,22 @@ const createProduct = asyncHandler(async (req, res) => {
     throw err;
   }
 
-  // --- Shop auto-attach (silent) ---
-  // If this seller has an APPROVED shop, the new product is automatically tied
-  // to it. No client input is trusted for this — it's derived purely from the
-  // seller's own shop status server-side. Sellers with no shop (or a shop
-  // that's pending/rejected/suspended) simply get shop: null (today's behavior).
   const approvedShop = await getApprovedShopForSeller(req.user._id);
 
   const images = req.files.map((file) => file.path);
+
+  // NEW — stock reminder settings, optional at creation time. Sellers can
+  // also set/edit these later from the "Manage Stock" panel via the
+  // dedicated PATCH /api/products/:id/stock-reminder endpoint below.
+  let stockReminderEnabled = false;
+  if (req.body.stockReminderEnabled !== undefined) {
+    stockReminderEnabled = req.body.stockReminderEnabled === true || req.body.stockReminderEnabled === 'true';
+  }
+  let stockReminderThreshold = 5;
+  if (req.body.stockReminderThreshold !== undefined && req.body.stockReminderThreshold !== '') {
+    const t = Number(req.body.stockReminderThreshold);
+    if (!Number.isNaN(t) && t >= 0) stockReminderThreshold = t;
+  }
 
   const product = await Product.create({
     seller: req.user._id,
@@ -411,11 +368,17 @@ const createProduct = asyncHandler(async (req, res) => {
     pricingTiers: wholesale.pricingTiers,
     freeDelivery: wholesale.freeDelivery,
     deliveryCharge: wholesale.deliveryCharge,
+    stockReminderEnabled,
+    stockReminderThreshold,
   });
 
   if (prepared.variants.length > 0) {
     await ProductVariant.insertMany(prepared.variants.map((v) => ({ ...v, product: product._id })));
   }
+
+  // Fire-and-forget: covers the (unusual but possible) case of creating a
+  // product that's already at/below its own reminder threshold.
+  checkAndSendStockReminder(product._id).catch(() => {});
 
   const populated = await Product.findById(product._id)
     .populate('category', 'name slug')
@@ -442,10 +405,6 @@ const updateProduct = asyncHandler(async (req, res) => {
     throw new Error('Not authorized to edit this product');
   }
 
-  // Sellers can edit a draft, a rejected product, or a currently-live product.
-  // Editing a live product pulls it back into review (handled below) so buyers
-  // never see unreviewed changes on the storefront. Pending/suspended products
-  // can't be touched until admin resolves them.
   if (!['draft', 'rejected', 'active'].includes(product.status)) {
     res.status(400);
     throw new Error('This product cannot be edited while pending review or suspended.');
@@ -474,8 +433,6 @@ const updateProduct = asyncHandler(async (req, res) => {
 
   const effectiveCategory = req.body.category || product.category.toString();
 
-  // Only re-validate/replace attributes+variants if the seller actually sent them,
-  // or changed category (in which case the old attributes may no longer apply).
   if (req.body.attributes !== undefined || req.body.variants !== undefined || req.body.category !== undefined) {
     let rawAttributes = [];
     let rawVariants = [];
@@ -507,15 +464,9 @@ const updateProduct = asyncHandler(async (req, res) => {
       product.stock = Number(req.body.stock);
     }
   } else if (req.body.stock !== undefined) {
-    // simple (non-variant) products can just update stock directly
     product.stock = Number(req.body.stock);
   }
 
-  // Wholesale-specific fields — only re-validated/applied when the seller actually
-  // sent one of these keys, so a plain "just editing the description" PUT from a
-  // wholesaler doesn't wipe out previously-saved tiers/delivery terms. Changing
-  // deliveryType counts as a wholesale-key change too, since it flips which of
-  // freeDelivery/deliveryCharge are even meaningful.
   const wholesaleKeysSent = [
     'deliveryType',
     'minOrderQuantity',
@@ -538,10 +489,6 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.deliveryCharge = wholesale.deliveryCharge;
   }
 
-  // Keep the shop link in sync with the seller's CURRENT shop status on every
-  // save — same "derive it silently, never trust the client" rule as creation.
-  // Covers cases like: product was created before the shop got approved, or
-  // the shop was later suspended.
   const approvedShop = await getApprovedShopForSeller(req.user._id);
   product.shop = approvedShop ? approvedShop._id : null;
 
@@ -549,16 +496,11 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.images = req.files.map((file) => file.path);
   }
 
-  // Editing after rejection sends it back into the review queue as a draft
-  // (seller still has to hit "Submit" — matches the normal draft flow).
   if (product.status === 'rejected') {
     product.status = 'draft';
     product.rejectionReason = '';
   }
 
-  // Editing a LIVE product pulls it from the storefront immediately and sends it
-  // straight back to admin's pending queue — no separate "submit" step, since the
-  // seller already made an explicit decision to change something that's selling.
   if (wasLive) {
     product.status = 'pending_review';
     product.reviewedBy = null;
@@ -566,6 +508,10 @@ const updateProduct = asyncHandler(async (req, res) => {
   }
 
   await product.save();
+
+  // NEW — stock may have just changed (directly, or via a variant total
+  // recompute above); re-evaluate this product's low-stock reminder state.
+  checkAndSendStockReminder(product._id).catch(() => {});
 
   const populated = await Product.findById(product._id)
     .populate('category', 'name slug')
@@ -575,7 +521,6 @@ const updateProduct = asyncHandler(async (req, res) => {
 
   res.json({ success: true, product: populated });
 
-  // A previously-live product just went back to pending_review — admins need to know.
   if (wasLive) {
     notifyAdminsProductPending(product, req.user.name);
   }
@@ -661,22 +606,15 @@ const getProducts = asyncHandler(async (req, res) => {
     limit = 20,
     hotDeals,
     attributes,
-    sellerRole, // 'wholesaler' | 'retailer' — lets the storefront show "Wholesale" sections
-    freeDelivery, // 'true' — powers the "Free Delivery Wholesale Products" section
-    shop, // shop id — lets a shop's own storefront page filter to just its products
-    discountOnly, // 'true' — only products with an active discountPercent > 0
-    minRating, // 1-5 — only products with ratingsAverage >= this (used by the
-    // "★★★★ & above" style rating filter on category-explore.html)
+    sellerRole,
+    freeDelivery,
+    shop,
+    discountOnly,
+    minRating,
   } = req.query;
 
   const filter = { status: 'active', isActive: true, finalPrice: { $ne: null } };
 
-  // Widen a category filter to include every descendant category too — see
-  // getCategoryAndDescendantIds() above for why (products only ever live on
-  // LEAF categories, so an exact match on a parent/mid-level id would
-  // otherwise return nothing). A leaf category id just resolves to a
-  // single-element array, so this is a no-op change in behaviour for leaf
-  // selections and only widens things for parent/mid-level selections.
   if (category) {
     const categoryIds = await getCategoryAndDescendantIds(category);
     filter.category = { $in: categoryIds };
@@ -686,20 +624,15 @@ const getProducts = asyncHandler(async (req, res) => {
   if (sellerRole === 'wholesaler' || sellerRole === 'retailer') filter.sellerRole = sellerRole;
   if (shop) filter.shop = shop;
   if (freeDelivery === 'true') {
-    // free delivery only ever applies to 'heavy' wholesale products — 'simple' ones
-    // ship like retail and never carry the free-delivery tag.
     filter.sellerRole = 'wholesaler';
     filter.deliveryType = 'heavy';
     filter.freeDelivery = true;
   }
 
-  // "Show only discounted items" toggle — any product currently carrying a
-  // positive discountPercent (displayPrice < finalPrice).
   if (discountOnly === 'true') {
     filter.discountPercent = { $gt: 0 };
   }
 
-  // "X stars & above" rating filter.
   if (minRating !== undefined && minRating !== '') {
     const ratingNum = Number(minRating);
     if (Number.isFinite(ratingNum) && ratingNum > 0) {
@@ -707,19 +640,6 @@ const getProducts = asyncHandler(async (req, res) => {
     }
   }
 
-  // ---------------------------------------------------------------------
-  // SEARCH — matches product name/description, the product's Brand/other
-  // attribute values (e.g. "Nike"), AND the category name it belongs to
-  // (e.g. typing "Electronics" or "Smartphones" surfaces every product
-  // under that category, same as clicking it). Case-insensitive, partial
-  // match on all three.
-  //
-  // Deliberately NOT using MongoDB's $text here: $text queries cannot be
-  // nested inside an $or clause alongside other conditions, which is
-  // exactly what's needed to search name + category + attributes together
-  // in one query. A plain case-insensitive regex search across a modest
-  // product catalog is simpler, combinable, and fast enough.
-  // ---------------------------------------------------------------------
   if (search && search.trim()) {
     const searchRegex = new RegExp(escapeRegex(search.trim()), 'i');
 
@@ -729,9 +649,6 @@ const getProducts = asyncHandler(async (req, res) => {
       { 'attributes.value': searchRegex },
     ];
 
-    // Category-name match: find every category whose name matches, then widen
-    // each to its full descendant set (same logic as the category filter above),
-    // so e.g. searching "Electronics" also returns everything nested under it.
     const matchingCategories = await Category.find({ name: searchRegex, isActive: true }).select('_id');
     if (matchingCategories.length) {
       const nestedIdLists = await Promise.all(
@@ -750,19 +667,6 @@ const getProducts = asyncHandler(async (req, res) => {
     if (maxPrice) filter.finalPrice.$lte = Number(maxPrice);
   }
 
-  // ---------------------------------------------------------------------
-  // Optional attribute filtering, e.g.
-  //   ?attributes={"<brandAttrId>":"Nike"}
-  //   ?attributes={"<brandAttrId>":["Nike","Samsung"],"<genderAttrId>":"Unisex"}
-  //
-  // Each attribute id maps to either a single value (exact match) or an
-  // array of values (OR'd together via $in — e.g. a Brand checkbox group
-  // where the shopper ticked more than one brand). Different attribute ids
-  // are AND'd together (checking "Nike" OR "Samsung" for Brand, AND
-  // "Unisex" for Gender). Only filters product-level attributes; variant-
-  // level (Size/Color) filtering is a follow-up once there's a query path
-  // for it against ProductVariant.
-  // ---------------------------------------------------------------------
   if (attributes) {
     try {
       const attrFilter = JSON.parse(attributes);
@@ -836,10 +740,7 @@ const getProductById = asyncHandler(async (req, res) => {
   res.json({ success: true, product });
 });
 
-// @desc    Lightweight autocomplete suggestions for the search box —
-//          matching product names + matching categories, capped small
-//          so it's cheap enough to call on every keystroke (debounced
-//          client-side).
+// @desc    Lightweight autocomplete suggestions for the search box
 // @route   GET /api/products/suggestions?q=phone
 // @access  Public
 const getProductSuggestions = asyncHandler(async (req, res) => {
@@ -874,9 +775,7 @@ const getProductSuggestions = asyncHandler(async (req, res) => {
 
 // ---------------- ANALYTICS ----------------
 
-// @desc    Fire-and-forget: increments a product's lifetime view counter and logs
-//          a timestamped row for the seller's trend chart. Called once per
-//          product-detail-page load, for logged-in buyers and guests alike.
+// @desc    Fire-and-forget view tracking ping
 // @route   PATCH /api/products/:id/view
 // @access  Public
 const trackProductViewCount = asyncHandler(async (req, res) => {
@@ -887,7 +786,6 @@ const trackProductViewCount = asyncHandler(async (req, res) => {
   ).select('_id seller');
 
   if (product) {
-    // Best-effort log — never let a logging failure affect the response.
     ProductView.create({
       product: product._id,
       seller: product.seller,
@@ -898,9 +796,7 @@ const trackProductViewCount = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
-// @desc    Seller's product-view analytics: lifetime + 14-day totals, a daily
-//          trend (zero-filled so the frontend can draw a continuous chart),
-//          and a per-product breakdown sorted by most-viewed first.
+// @desc    Seller's product-view analytics
 // @route   GET /api/products/analytics
 // @access  Private (wholesaler, retailer)
 const getMyProductAnalytics = asyncHandler(async (req, res) => {
@@ -910,7 +806,7 @@ const getMyProductAnalytics = asyncHandler(async (req, res) => {
 
   const since = new Date();
   since.setHours(0, 0, 0, 0);
-  since.setDate(since.getDate() - 13); // last 14 days including today
+  since.setDate(since.getDate() - 13);
 
   const trend = await ProductView.aggregate([
     { $match: { seller: req.user._id, viewedAt: { $gte: since } } },
@@ -949,6 +845,92 @@ const getMyProductAnalytics = asyncHandler(async (req, res) => {
   });
 });
 
+// ---------------- MANAGE STOCK (NEW) ----------------
+
+// @desc    Seller's full stock overview for the "Manage Stock" panel —
+//          every active product with its stock, reminder settings, and
+//          whether it's currently in a low-stock state.
+// @route   GET /api/products/stock-overview
+// @access  Private (wholesaler, retailer)
+const getMyStockOverview = asyncHandler(async (req, res) => {
+  const products = await Product.find({ seller: req.user._id, isActive: true })
+    .select('name images status stock stockReminderEnabled stockReminderThreshold lastStockReminderSentAt')
+    .sort('stock');
+
+  res.json({
+    success: true,
+    products: products.map((p) => ({
+      id: p._id,
+      name: p.name,
+      image: (p.images && p.images[0]) || null,
+      status: p.status,
+      stock: p.stock,
+      stockReminderEnabled: p.stockReminderEnabled,
+      stockReminderThreshold: p.stockReminderThreshold,
+      isLowStock: p.stockReminderEnabled ? p.stock <= p.stockReminderThreshold : false,
+      lastReminderSentAt: p.lastStockReminderSentAt,
+    })),
+  });
+});
+
+// @desc    Seller sets/updates a product's low-stock reminder settings
+//          (threshold quantity + on/off). Re-evaluates immediately so a
+//          threshold change that instantly puts the product into (or out
+//          of) a low-stock state takes effect right away.
+// @route   PATCH /api/products/:id/stock-reminder
+// @access  Private (owner only)
+const updateStockReminderSettings = asyncHandler(async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (!product) {
+    res.status(404);
+    throw new Error('Product not found');
+  }
+  if (product.seller.toString() !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Not authorized');
+  }
+
+  const { stockReminderEnabled, stockReminderThreshold } = req.body;
+
+  if (stockReminderEnabled !== undefined) {
+    product.stockReminderEnabled = stockReminderEnabled === true || stockReminderEnabled === 'true';
+  }
+
+  if (stockReminderThreshold !== undefined && stockReminderThreshold !== '') {
+    const threshold = Number(stockReminderThreshold);
+    if (Number.isNaN(threshold) || threshold < 0) {
+      res.status(400);
+      throw new Error('Threshold must be a non-negative number');
+    }
+    product.stockReminderThreshold = threshold;
+  }
+
+  // If the new threshold puts current stock back above it, clear any
+  // outstanding alert flag so the NEXT dip sends a fresh reminder.
+  if (product.stock > product.stockReminderThreshold) {
+    product.lastStockReminderSentAt = null;
+  }
+
+  await product.save();
+
+  // If saving these settings just put the product into a low-stock state
+  // (or it already was one and reminders were just turned on), send now
+  // rather than waiting for the next stock change or scheduled sweep.
+  if (product.stockReminderEnabled && product.stock <= product.stockReminderThreshold) {
+    await checkAndSendStockReminder(product._id);
+  }
+
+  res.json({
+    success: true,
+    product: {
+      id: product._id,
+      stock: product.stock,
+      stockReminderEnabled: product.stockReminderEnabled,
+      stockReminderThreshold: product.stockReminderThreshold,
+    },
+  });
+});
+
 module.exports = {
   createProduct,
   updateProduct,
@@ -960,4 +942,6 @@ module.exports = {
   getProductSuggestions,
   trackProductViewCount,
   getMyProductAnalytics,
+  getMyStockOverview,           // NEW
+  updateStockReminderSettings,  // NEW
 };

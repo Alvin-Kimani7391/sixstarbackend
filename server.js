@@ -9,6 +9,7 @@ const morgan = require('morgan');
 const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 const { startRFQScheduler } = require('./utils/rfqScheduler');
 const { startPaymentReaper } = require('./utils/paymentReaper');
+const { startStockReminderScheduler } = require('./utils/stockReminderScheduler'); // NEW — add near the other requires
 
 dotenv.config();
 
@@ -112,7 +113,7 @@ mongoose
       console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
     });
     startRFQScheduler(); // NEW — expires overdue RFQs, sends deadline reminders
-    startPaymentReaper(); // NEW — expires queued STK payments that never completed
+    startStockReminderScheduler(); // NEW — periodic low-stock reminder sweep
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err.message);

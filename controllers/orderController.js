@@ -17,6 +17,7 @@ const {
 const { getCategoryAttributeDefs } = require('./categoryAttributeController');
 const { resolveCategoryCommissionRate } = require('./categoryController');
 const { resolveTransactionFee } = require('./transactionFeeController');
+const { checkAndSendStockReminder } = require('../utils/stockReminderService'); // NEW
 
 // Mirrors SS_CART.resolveUnitPrice on the frontend, but this is the copy that
 // actually decides what gets charged — the client-side one is just a preview.
@@ -370,6 +371,9 @@ const createOrder = asyncHandler(async (req, res) => {
       // normal line. (Flash Sale items don't support variants yet, so no
       // variant-level decrement here.)
       await Product.findByIdAndUpdate(product._id, { $inc: { stock: -quantity } });
+      // NEW — stock just dropped; check if this product has now crossed into
+      // (or is still within) its seller-configured low-stock threshold.
+      checkAndSendStockReminder(product._id).catch(() => {});
       continue; // no separate variant stock decrement for Flash Sale lines
     }
 
@@ -377,6 +381,8 @@ const createOrder = asyncHandler(async (req, res) => {
       await ProductVariant.findByIdAndUpdate(variantDoc._id, { $inc: { stock: -quantity } });
     }
     await Product.findByIdAndUpdate(product._id, { $inc: { stock: -quantity } });
+    // NEW — same check for regular (non-Flash-Sale) lines.
+    checkAndSendStockReminder(product._id).catch(() => {});
   }
 
   const retailTransportFee = hasRetailItem ? Math.max(0, Number(transportFee) || 0) : 0;
@@ -965,6 +971,11 @@ const cancelOrder = asyncHandler(async (req, res) => {
   // nothing needs reversing here.
   for (const item of order.items) {
     await Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } });
+    // NEW — stock just went back UP (a cancellation), which may push the
+    // product back above its seller-configured threshold and re-arm future
+    // low-stock alerts. checkAndSendStockReminder() re-fetches the product
+    // itself and no-ops safely if reminders are off or it's still low.
+    checkAndSendStockReminder(item.product).catch(() => {});
     if (item.variant) {
       await ProductVariant.findByIdAndUpdate(item.variant, { $inc: { stock: item.quantity } });
     }

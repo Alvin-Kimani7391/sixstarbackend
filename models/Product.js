@@ -4,16 +4,11 @@ const { Schema } = mongoose;
 const productAttributeValueSchema = new Schema(
   {
     attribute: { type: Schema.Types.ObjectId, ref: 'Attribute', required: true },
-    value: { type: Schema.Types.Mixed, required: true }, // string, number, boolean, or array (multiselect)
+    value: { type: Schema.Types.Mixed, required: true },
   },
   { _id: false }
 );
 
-// ---------------------------------------------------------------------------
-// Wholesale-only sub-schemas
-// ---------------------------------------------------------------------------
-
-// A single "buy N or more, pay this price" tier, e.g. { minQty: 100, price: 450 }
 const pricingTierSchema = new Schema(
   {
     minQty: { type: Number, required: true, min: 1 },
@@ -22,15 +17,6 @@ const pricingTierSchema = new Schema(
   { _id: false }
 );
 
-// Wholesale delivery terms. Only meaningful when sellerRole === 'wholesaler'
-// AND deliveryType === 'heavy' (see below).
-//  - freeDelivery = true  -> the rest of this object is ignored, product gets the
-//    "Free Delivery" tag on the frontend.
-//  - freeDelivery = false -> chargeType decides which of the amount fields applies:
-//      fixed          -> flat `amount` regardless of quantity ordered
-//      quantity_based -> `perUnitAmount` x quantity ordered
-//      negotiated     -> no fixed figure, `notes` explains how it's agreed (e.g. "Contact
-//                         seller for a delivery quote based on destination and volume")
 const deliveryChargeSchema = new Schema(
   {
     chargeType: {
@@ -38,9 +24,9 @@ const deliveryChargeSchema = new Schema(
       enum: ['fixed', 'quantity_based', 'negotiated'],
       default: 'fixed',
     },
-    amount: { type: Number, default: 0, min: 0 }, // used when chargeType === 'fixed'
-    perUnitAmount: { type: Number, default: 0, min: 0 }, // used when chargeType === 'quantity_based'
-    notes: { type: String, default: '', trim: true }, // used when chargeType === 'negotiated'
+    amount: { type: Number, default: 0, min: 0 },
+    perUnitAmount: { type: Number, default: 0, min: 0 },
+    notes: { type: String, default: '', trim: true },
   },
   { _id: false }
 );
@@ -54,16 +40,12 @@ const productSchema = new Schema(
       required: true,
     },
 
-    // Nullable — only set automatically when the seller has an APPROVED shop at
-    // the time the product is created. Sellers with no shop (or a shop still
-    // pending/rejected/suspended) simply get null here, exactly like today.
-    // Not seller-editable directly; the backend decides this, never the client.
     shop: { type: Schema.Types.ObjectId, ref: 'Shop', default: null, index: true },
 
     name: { type: String, required: true, trim: true },
     description: { type: String, required: true },
     images: {
-      type: [String], // Cloudinary URLs
+      type: [String],
       validate: {
         validator: (arr) => arr.length > 0 && arr.length <= 8,
         message: 'A product must have between 1 and 8 images',
@@ -73,30 +55,17 @@ const productSchema = new Schema(
 
     category: { type: Schema.Types.ObjectId, ref: 'Category', required: true },
 
-    // Product-level attribute values (e.g. Brand: "Nike", Gender: "Unisex").
-    // Attributes flagged isVariantAttribute never appear here - they live on ProductVariant instead.
     attributes: {
       type: [productAttributeValueSchema],
       default: [],
     },
 
-    // If the category has variant-defining attributes (e.g. Size/Color), this is the
-    // SUM of all variant stock and is kept in sync whenever variants are written.
-    // If the category has none, this is the plain, directly-editable stock count.
     stock: { type: Number, required: true, min: 0, default: 0 },
 
-    // --- Pricing / monetization gate ---
-    sellerPrice: { type: Number, required: true }, // what the seller proposes
-    finalPrice: { type: Number, default: null }, // what admin sets — this is the real selling price
+    sellerPrice: { type: Number, required: true },
+    finalPrice: { type: Number, default: null },
     discountPercent: { type: Number, default: 0, min: 0, max: 90 },
 
-    // --- Wholesaler-only fields (ignored/validated-away for retailers) ---
-
-    // Whether this wholesale product needs its own negotiated/bulky transport terms
-    // ('heavy' — the classic wholesale delivery panel below applies), or is light
-    // enough to just ship like a normal retail item at checkout ('simple' — buyer
-    // pays the regular regional transport fee, no MOQ-style delivery math at all).
-    // Always 'simple' for retailers (irrelevant to them).
     deliveryType: {
       type: String,
       enum: ['simple', 'heavy'],
@@ -106,18 +75,33 @@ const productSchema = new Schema(
       type: Number,
       default: 1,
       min: 1,
-    }, // smallest quantity a buyer may order of THIS product
+    },
     pricingTiers: {
       type: [pricingTierSchema],
       default: [],
-    }, // quantity-based bulk pricing, e.g. 50 units @ X, 100 units @ Y, 500 units @ Z
-    freeDelivery: { type: Boolean, default: false }, // only meaningful when deliveryType === 'heavy'
+    },
+    freeDelivery: { type: Boolean, default: false },
     deliveryCharge: {
       type: deliveryChargeSchema,
       default: () => ({}),
-    }, // only meaningful when deliveryType === 'heavy'
+    },
 
-    // --- Approval workflow ---
+    // ---------------------------------------------------------------
+    // NEW — Low-stock reminder settings (seller-configurable, drives the
+    // "Manage Stock" panel on the seller dashboard's Analytics page).
+    //   - stockReminderEnabled:  whether this product's stock is being watched at all
+    //   - stockReminderThreshold: the seller-chosen quantity ("remind me at <= X")
+    //   - lastStockReminderSentAt: bookkeeping only — null means "not currently
+    //     in a low-stock alert state" (either never dropped below threshold, or
+    //     it dropped and has since been restocked above it, re-arming future
+    //     alerts). Non-null means an email has already gone out for the CURRENT
+    //     dip and is still being periodically re-sent by the scheduler until
+    //     the seller restocks (see utils/stockReminderService.js).
+    // ---------------------------------------------------------------
+    stockReminderEnabled: { type: Boolean, default: false },
+    stockReminderThreshold: { type: Number, default: 5, min: 0 },
+    lastStockReminderSentAt: { type: Date, default: null },
+
     status: {
       type: String,
       enum: ['draft', 'pending_review', 'active', 'rejected', 'suspended'],
@@ -128,38 +112,28 @@ const productSchema = new Schema(
     reviewedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     reviewedAt: { type: Date, default: null },
 
-    isHotDeal: { type: Boolean, default: false }, // toggled only by admin
+    isHotDeal: { type: Boolean, default: false },
 
-    // --- Ratings (auto-calculated from Review collection) ---
     ratingsAverage: { type: Number, default: 0, min: 0, max: 5 },
     ratingsCount: { type: Number, default: 0 },
 
-    // --- Analytics ---
-    // Lifetime total of product-detail-page views. Incremented via $inc on every
-    // public view (see trackProductViewCount) — cheap to read for dashboard cards.
-    // Day-by-day trend data lives in the separate ProductView collection.
     viewCount: { type: Number, default: 0, index: true },
 
-    isActive: { type: Boolean, default: true }, // seller/admin can soft-delete
+    isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
 );
 
-// Virtual: the effective displayed price after discount, only meaningful once finalPrice is set
 productSchema.virtual('displayPrice').get(function () {
   if (this.finalPrice == null) return null;
   if (!this.discountPercent) return this.finalPrice;
   return Math.round(this.finalPrice * (1 - this.discountPercent / 100));
 });
 
-// Virtual: the free-delivery tag used to group/filter on the frontend
-// (e.g. "Free Delivery Wholesale Products" section). Always false for retailers
-// and for 'simple' wholesale products (those ship like retail, no tag).
 productSchema.virtual('hasFreeDeliveryTag').get(function () {
   return this.sellerRole === 'wholesaler' && this.deliveryType === 'heavy' && this.freeDelivery === true;
 });
 
-// Virtual populate: lets us do Product.find().populate('variants') without embedding them
 productSchema.virtual('variants', {
   ref: 'ProductVariant',
   localField: '_id',
@@ -169,10 +143,11 @@ productSchema.virtual('variants', {
 productSchema.set('toJSON', { virtuals: true });
 productSchema.set('toObject', { virtuals: true });
 
-// Helpful compound index for the public storefront query
 productSchema.index({ status: 1, isActive: 1, category: 1 });
 productSchema.index({ status: 1, isHotDeal: 1 });
-productSchema.index({ status: 1, sellerRole: 1, freeDelivery: 1 }); // "Free Delivery Wholesale Products" section
-productSchema.index({ name: 'text', description: 'text' }); // for search
+productSchema.index({ status: 1, sellerRole: 1, freeDelivery: 1 });
+productSchema.index({ name: 'text', description: 'text' });
+// NEW — used by the scheduler's recheckAllLowStockProducts() sweep
+productSchema.index({ stockReminderEnabled: 1, isActive: 1, lastStockReminderSentAt: 1 });
 
 module.exports = mongoose.model('Product', productSchema);
