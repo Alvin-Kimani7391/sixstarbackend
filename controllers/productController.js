@@ -931,6 +931,68 @@ const updateStockReminderSettings = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    Bulk-set stock reminder settings (enable/disable + threshold) for
+//          many of the seller's own products at once — powers the "Select
+//          all / select individually" hybrid bulk actions on the Manage
+//          Stock panel.
+// @route   PATCH /api/products/stock-reminder/bulk
+// @access  Private (owner only, wholesaler/retailer)
+const bulkUpdateStockReminderSettings = asyncHandler(async (req, res) => {
+  const { productIds, stockReminderEnabled, stockReminderThreshold } = req.body;
+
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    res.status(400);
+    throw new Error('Please select at least one product');
+  }
+
+  const update = {};
+  if (stockReminderEnabled !== undefined) {
+    update.stockReminderEnabled = stockReminderEnabled === true || stockReminderEnabled === 'true';
+  }
+  if (stockReminderThreshold !== undefined && stockReminderThreshold !== '') {
+    const threshold = Number(stockReminderThreshold);
+    if (Number.isNaN(threshold) || threshold < 0) {
+      res.status(400);
+      throw new Error('Threshold must be a non-negative number');
+    }
+    update.stockReminderThreshold = threshold;
+  }
+
+  if (Object.keys(update).length === 0) {
+    res.status(400);
+    throw new Error('Nothing to update');
+  }
+
+  // Only ever touch products this seller actually owns, even if a stale/
+  // tampered ID list is sent from the client.
+  const owned = await Product.find({ _id: { $in: productIds }, seller: req.user._id }).select('_id');
+  if (!owned.length) {
+    res.status(404);
+    throw new Error('No matching products found');
+  }
+  const ids = owned.map((p) => p._id);
+
+  await Product.updateMany({ _id: { $in: ids } }, { $set: update });
+
+  // Re-evaluate each affected product: re-arm reminders that are now back
+  // above threshold, and fire an immediate email for any that just got
+  // switched on (or re-thresholded) into an already-low-stock state.
+  const updatedProducts = await Product.find({ _id: { $in: ids } });
+  for (const p of updatedProducts) {
+    if (p.stock > p.stockReminderThreshold && p.lastStockReminderSentAt) {
+      p.lastStockReminderSentAt = null;
+      await p.save();
+    }
+  }
+  updatedProducts.forEach((p) => {
+    if (p.stockReminderEnabled && p.stock <= p.stockReminderThreshold) {
+      checkAndSendStockReminder(p._id).catch(() => {});
+    }
+  });
+
+  res.json({ success: true, updatedCount: ids.length });
+});
+
 module.exports = {
   createProduct,
   updateProduct,
@@ -944,4 +1006,5 @@ module.exports = {
   getMyProductAnalytics,
   getMyStockOverview,           // NEW
   updateStockReminderSettings,  // NEW
+  bulkUpdateStockReminderSettings, // NEW
 };
