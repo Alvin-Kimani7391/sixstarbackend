@@ -8,6 +8,7 @@ const FlashSale = require('../models/FlashSale');
 const { User } = require('../models/User');
 const safeSendEmail = require('../utils/safeSendEmail');
 const getAdminEmails = require('../utils/getAdminEmails');
+const { calculateDynamicShippingFee } = require('../utils/shippingFeeCalculator');
 const {
   orderConfirmationTemplate,
   newOrderSellerTemplate,
@@ -385,7 +386,21 @@ const createOrder = asyncHandler(async (req, res) => {
     checkAndSendStockReminder(product._id).catch(() => {});
   }
 
-  const retailTransportFee = hasRetailItem ? Math.max(0, Number(transportFee) || 0) : 0;
+    // ---------------- DYNAMIC SHIPPING (NEW) ----------------
+  // The client-sent `transportFee` is NEVER trusted — it's ignored entirely.
+  // We recompute the authoritative shipping fee server-side, off the exact
+  // same items that were just validated above, using the single shared
+  // calculator (see utils/shippingFeeCalculator.js) so this number can never
+  // drift from what the checkout page shows as a live preview. Heavy-wholesale
+  // items are excluded automatically by the calculator (their own delivery
+  // fee is already computed separately, above, as wholesaleDeliveryTotal).
+  const shippingLines = prepared.map(({ product, quantity }) => ({
+    productId: product._id,
+    quantity,
+  }));
+  const shippingResult = await calculateDynamicShippingFee(shippingLines);
+  const retailTransportFee = shippingResult.standardShippingFee || 0;
+
   const deliveryFeeTotal = retailTransportFee + wholesaleDeliveryTotal;
   const totalAmount = itemsTotal + deliveryFeeTotal;
 
@@ -407,10 +422,22 @@ const createOrder = asyncHandler(async (req, res) => {
     paymentMethod: method,
     mpesaMessage: method === 'manual' ? mpesaMessage : '',
     deliveryFee: deliveryFeeTotal,
-    deliveryDetails: {
+        deliveryDetails: {
       transportFee: retailTransportFee,
       wholesaleDeliveryFee: wholesaleDeliveryTotal,
       notes: deliveryNotes,
+      // NEW — dynamic shipping breakdown, for admin/support/email use
+      normalWeightTotalKg: shippingResult.normalWeightTotalKg || 0,
+      normalTierApplied: shippingResult.normalTierApplied
+        ? {
+            id: shippingResult.normalTierApplied.id,
+            label: shippingResult.normalTierApplied.label,
+            weightFrom: shippingResult.normalTierApplied.weightFrom,
+            weightTo: shippingResult.normalTierApplied.weightTo,
+            price: shippingResult.normalTierApplied.price,
+          }
+        : { id: null, label: '', weightFrom: null, weightTo: null, price: 0 },
+      specialShippingBreakdown: shippingResult.specialBreakdown || [],
     },
     shippingAddress,
     paymentStatus: 'pending_verification',

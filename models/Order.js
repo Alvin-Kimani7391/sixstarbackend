@@ -59,10 +59,38 @@ const orderSchema = new Schema(
     totalAmount: { type: Number, required: true },
 
     deliveryFee: { type: Number, default: 0 },
-    deliveryDetails: {
+        deliveryDetails: {
       transportFee: { type: Number, default: 0 },
       wholesaleDeliveryFee: { type: Number, default: 0 },
       notes: { type: [String], default: [] },
+
+      // NEW — dynamic shipping breakdown snapshot (see utils/shippingFeeCalculator.js).
+      // transportFee above IS the resolved calculateDynamicShippingFee() total
+      // (normal-weight tier price + special-criteria fees) for every
+      // non-heavy-wholesale line in this order. These extra fields just keep
+      // the human-readable "why" alongside it for admin/support/email use.
+      normalWeightTotalKg: { type: Number, default: 0 },
+      normalTierApplied: {
+        id: { type: Schema.Types.ObjectId, default: null },
+        label: { type: String, default: '' },
+        weightFrom: { type: Number, default: null },
+        weightTo: { type: Number, default: null },
+        price: { type: Number, default: 0 },
+      },
+      specialShippingBreakdown: {
+        type: [
+          {
+            productId: { type: Schema.Types.ObjectId, ref: 'Product' },
+            productName: String,
+            criteriaName: String,
+            optionLabel: String,
+            unitPrice: Number,
+            quantity: Number,
+            lineTotal: Number,
+          },
+        ],
+        default: [],
+      },
     },
 
     shippingAddress: {

@@ -33,6 +33,29 @@ const categorySchema = new Schema(
     // gets resolved and snapshotted onto each order line at purchase time.
     commissionRate: { type: Number, default: null, min: 0, max: 100 },
 
+    // ------------------------------------------------------------------
+    // SHIPPING CLASSIFICATION (NEW)
+    // ------------------------------------------------------------------
+    // 'normal'  -> shipping is priced off total WEIGHT (kg), matched
+    //              against the admin-configured WeightTier ladder.
+    // 'special' -> shipping is priced off admin-configured ShippingCriteria
+    //              (per-category priced option groups the seller must pick
+    //              from, e.g. "Size Class: Large -> KSh 400").
+    //
+    // null/undefined = "not set on this category" -> INHERITED from the
+    // nearest ancestor that has one, same walk pattern as commissionRate,
+    // falling back to 'normal' if nothing in the chain is set. This lets an
+    // admin default everything to weight-based shipping and only flip a
+    // specific Category/Sub Category to 'special' where it's genuinely
+    // priced differently (e.g. fragile, oversized, hazardous goods).
+    //
+    // See resolveCategoryShippingType() in categoryController.js.
+    shippingType: {
+      type: String,
+      enum: ['normal', 'special'],
+      default: null,
+    },
+
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
