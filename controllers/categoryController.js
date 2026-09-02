@@ -7,34 +7,18 @@ const MAX_LEVEL = 2; // 0 = Parent Category, 1 = Category, 2 = Sub Category
 // ---------------------------------------------------------------------------
 // MARKETPLACE COMMISSION
 // ---------------------------------------------------------------------------
-// Platform-wide fallback used only when NEITHER a category nor any of its
-// ancestors has an explicit commissionRate set. Override via the
-// DEFAULT_COMMISSION_RATE env var if you want to change this without a
-// redeploy — it is read fresh on every call, not cached.
 const getDefaultCommissionRate = () => {
   const fromEnv = Number(process.env.DEFAULT_COMMISSION_RATE);
   return Number.isFinite(fromEnv) ? fromEnv : 10;
 };
 
-// Walks a category up through its parentCategory chain until it finds one
-// with commissionRate explicitly set (not null/undefined), and returns that
-// rate. If nothing in the chain has one, falls back to the platform default.
-//
-// Returns: { rate, source, sourceName }
-//   - rate: the effective percentage (number, e.g. 12)
-//   - source: the ObjectId of the category whose own rate applied, or the
-//     string 'default' if the platform default was used
-//   - sourceName: a human-readable label for that source, for admin/seller UI
-//
-// Accepts either a category id (string/ObjectId) or an already-loaded
-// category document (as long as it has _id/commissionRate/parentCategory).
 const resolveCategoryCommissionRate = async (categoryIdOrDoc) => {
   let current =
     categoryIdOrDoc && categoryIdOrDoc.commissionRate !== undefined && categoryIdOrDoc._id
       ? categoryIdOrDoc
       : await Category.findById(categoryIdOrDoc).select('commissionRate parentCategory name');
 
-  const visited = new Set(); // guards against any accidental cycles in the data
+  const visited = new Set();
   while (current) {
     const idStr = String(current._id);
     if (visited.has(idStr)) break;
@@ -50,6 +34,50 @@ const resolveCategoryCommissionRate = async (categoryIdOrDoc) => {
   }
 
   return { rate: getDefaultCommissionRate(), source: 'default', sourceName: 'Platform default' };
+};
+
+// ---------------------------------------------------------------------------
+// SHIPPING CLASSIFICATION (NEW) — 'normal' (weight-based) vs 'special'
+// (criteria-based). Same ancestor-inheritance walk as commission, above.
+// Platform default is always 'normal' — every category ships as a normal,
+// weight-priced item unless an admin explicitly specializes it or one of
+// its ancestors.
+// ---------------------------------------------------------------------------
+const resolveCategoryShippingType = async (categoryIdOrDoc) => {
+  let current =
+    categoryIdOrDoc && categoryIdOrDoc.shippingType !== undefined && categoryIdOrDoc._id
+      ? categoryIdOrDoc
+      : await Category.findById(categoryIdOrDoc).select('shippingType parentCategory name');
+
+  const visited = new Set();
+  while (current) {
+    const idStr = String(current._id);
+    if (visited.has(idStr)) break;
+    visited.add(idStr);
+
+    if (current.shippingType) {
+      return { shippingType: current.shippingType, source: current._id, sourceName: current.name };
+    }
+
+    current = current.parentCategory
+      ? await Category.findById(current.parentCategory).select('shippingType parentCategory name')
+      : null;
+  }
+
+  return { shippingType: 'normal', source: 'default', sourceName: 'Platform default' };
+};
+
+// Parses/validates a raw shippingType value coming from the request body.
+// Accepts: undefined (leave alone), '' / 'null' (clear -> inherit), or
+// exactly 'normal' / 'special'.
+const parseShippingTypeInput = (raw) => {
+  if (raw === '' || raw === 'null' || raw === null) return null;
+  if (!['normal', 'special'].includes(raw)) {
+    const err = new Error("shippingType must be 'normal' or 'special'");
+    err.status = 400;
+    throw err;
+  }
+  return raw;
 };
 
 // @desc    Get all active categories (flat list — for navbar, filters, product creation form)
@@ -103,7 +131,6 @@ const getCategoryBySlug = asyncHandler(async (req, res) => {
 
   const children = await Category.find({ parentCategory: category._id, isActive: true }).sort('name');
 
-  // walk up the parentCategory chain to build the breadcrumb trail
   const breadcrumb = [category];
   let current = category;
   while (current.parentCategory) {
@@ -137,11 +164,6 @@ const cascadeLevelUpdate = async (categoryId, newLevel) => {
 };
 
 // Parses/validates a raw commissionRate value coming from the request body.
-// Accepts: undefined (means "field wasn't sent, leave alone" — caller checks
-// this separately), '' or 'null' (means "clear it, go back to inheriting"),
-// or a numeric string/number between 0 and 100.
-// Returns null to mean "clear it", or a validated number.
-// Throws an Error with .status = 400 on anything invalid.
 const parseCommissionRateInput = (raw) => {
   if (raw === '' || raw === 'null' || raw === null) return null;
   const parsed = Number(raw);
@@ -157,7 +179,7 @@ const parseCommissionRateInput = (raw) => {
 // @route   POST /api/categories
 // @access  Private (admin)
 const createCategory = asyncHandler(async (req, res) => {
-  const { name, parentCategory, commissionRate } = req.body;
+  const { name, parentCategory, commissionRate, shippingType } = req.body;
   if (!name) {
     res.status(400);
     throw new Error('Category name is required');
@@ -192,6 +214,16 @@ const createCategory = asyncHandler(async (req, res) => {
     }
   }
 
+  let parsedShippingType = null;
+  if (shippingType !== undefined) {
+    try {
+      parsedShippingType = parseShippingTypeInput(shippingType);
+    } catch (err) {
+      res.status(err.status || 400);
+      throw err;
+    }
+  }
+
   const category = await Category.create({
     name,
     slug,
@@ -199,6 +231,7 @@ const createCategory = asyncHandler(async (req, res) => {
     parentCategory: parentCategory || null,
     level,
     commissionRate: parsedCommission,
+    shippingType: parsedShippingType,
   });
   res.status(201).json({ success: true, category });
 });
@@ -232,6 +265,17 @@ const updateCategory = asyncHandler(async (req, res) => {
     }
   }
 
+  // Shipping classification — same "apply before the early-return move
+  // branch" treatment as commission above.
+  if (req.body.shippingType !== undefined) {
+    try {
+      category.shippingType = parseShippingTypeInput(req.body.shippingType);
+    } catch (err) {
+      res.status(err.status || 400);
+      throw err;
+    }
+  }
+
   if (req.body.parentCategory !== undefined) {
     const newParentId = req.body.parentCategory || null;
 
@@ -240,7 +284,6 @@ const updateCategory = asyncHandler(async (req, res) => {
       throw new Error('A category cannot be its own parent');
     }
 
-    // prevent creating a cycle (assigning a descendant as the parent)
     let newLevel = 0;
     if (newParentId) {
       let cursor = await Category.findById(newParentId);
@@ -259,7 +302,6 @@ const updateCategory = asyncHandler(async (req, res) => {
       newLevel = cursor.level + 1;
     }
 
-    // reject the move if it would push any existing subcategory below this one past the max depth
     const descendantDepth = await getMaxDescendantDepth(category._id);
     if (newLevel + descendantDepth > MAX_LEVEL) {
       res.status(400);
@@ -309,14 +351,9 @@ const deleteCategory = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Category removed' });
 });
 
-// @desc    Resolve the EFFECTIVE marketplace commission rate for a category —
-//          its own rate if set, otherwise inherited from the nearest ancestor
-//          that has one, otherwise the platform default. This is what powers
-//          the "Marketplace commission for this category: X%" notice sellers
-//          see while creating a product, and what the admin category form
-//          shows as the live preview when a rate field is left blank.
+// @desc    Resolve the EFFECTIVE marketplace commission rate for a category.
 // @route   GET /api/categories/:id/commission
-// @access  Public (sellers need this while picking a category on the product form)
+// @access  Public
 const getCategoryCommission = asyncHandler(async (req, res) => {
   const category = await Category.findById(req.params.id).select('_id');
   if (!category) {
@@ -333,6 +370,29 @@ const getCategoryCommission = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    Resolve the EFFECTIVE shipping classification for a category —
+//          its own setting if set, otherwise inherited from the nearest
+//          ancestor, otherwise 'normal'. Powers the seller product wizard's
+//          weight-field vs shipping-criteria-picker branch, and the admin
+//          category form's live preview.
+// @route   GET /api/categories/:id/shipping
+// @access  Public
+const getCategoryShippingType = asyncHandler(async (req, res) => {
+  const category = await Category.findById(req.params.id).select('_id');
+  if (!category) {
+    res.status(404);
+    throw new Error('Category not found');
+  }
+  const { shippingType, source, sourceName } = await resolveCategoryShippingType(req.params.id);
+  res.json({
+    success: true,
+    shippingType,
+    inherited: source !== String(req.params.id),
+    source,
+    sourceName,
+  });
+});
+
 module.exports = {
   getCategories,
   getAllCategoriesAdmin,
@@ -342,6 +402,8 @@ module.exports = {
   updateCategory,
   deleteCategory,
   getCategoryCommission,
-  resolveCategoryCommissionRate, // used by orderController.js to snapshot commission per order line
+  getCategoryShippingType,
+  resolveCategoryCommissionRate, // used by orderController.js
+  resolveCategoryShippingType,   // used by productController.js + shippingFeeCalculator.js
   getDefaultCommissionRate,
 };

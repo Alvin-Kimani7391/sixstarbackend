@@ -70,6 +70,21 @@ const {
   rejectFlashSale,
 } = require('../controllers/flashSaleController');
 
+// ---------- NEW: Dynamic Shipping (Weight Tiers + Shipping Criteria) ----------
+const {
+  getAllWeightTiersAdmin,
+  createWeightTier,
+  updateWeightTier,
+  deleteWeightTier,
+} = require('../controllers/weightTierController');
+
+const {
+  getAllShippingCriteriaAdmin,
+  createShippingCriteria,
+  updateShippingCriteria,
+  deleteShippingCriteria,
+} = require('../controllers/shippingCriteriaController');
+
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadProductImages, uploadLegalDocument } = require('../middleware/uploadMiddleware');
 
@@ -132,14 +147,6 @@ router.patch('/products/:id/suspend', suspendProduct);
 
 // ============================================================
 // Flash Sale (daily 2:00 PM \u2013 midnight deals)
-// ------------------------------------------------------------
-// A seller submits a live product (price, stock allocation, sale
-// date) at least 24h ahead via POST /api/flash-sales. It lands
-// here as 'pending_review' until an admin approves or rejects it.
-// Once approved, a background scheduler (utils/flashSaleScheduler.js)
-// automatically flips it live at 2:00 PM and ends it at midnight
-// or the moment its allocated stock sells out \u2014 no further admin
-// action needed after approval.
 // ============================================================
 router.get('/flash-sales', getAllFlashSalesAdmin); // ?status=&page=&limit=
 router.get('/flash-sales/pending', getPendingFlashSales);
@@ -149,14 +156,11 @@ router.patch('/flash-sales/:id/reject', rejectFlashSale);
 // ============================================================
 // Orders
 // ============================================================
-// ============================================================
-// Orders
-// ============================================================
 router.get('/orders', getAllOrdersAdmin);
 router.get('/orders/pending-payment', getPendingPaymentOrders);
 router.patch('/orders/:id/verify-payment', verifyOrderPayment);
 
-// STK Push issues — NEW
+// STK Push issues
 router.get('/orders/stk-issues', getStkPaymentIssues);
 router.patch('/orders/:id/stk-recheck', recheckStkPayment);
 router.patch('/orders/:id/stk-cancel', forceCancelStkOrder);
@@ -171,13 +175,27 @@ router.get('/earnings/orders', getEarningsOrders);
 // ============================================================
 // Transaction Fees (seller-side payment-processing fee ladder)
 // ============================================================
-
-
-
 router.get('/transaction-fees', getAllTiersAdmin);
 router.post('/transaction-fees', createTransactionFeeTier);
 router.patch('/transaction-fees/:id', updateTransactionFeeTier);
 router.delete('/transaction-fees/:id', deleteTransactionFeeTier);
+
+// ============================================================
+// NEW — Dynamic Shipping: Weight Tiers (for 'normal' categories)
+// ============================================================
+router.get('/weight-tiers', getAllWeightTiersAdmin);
+router.post('/weight-tiers', createWeightTier);
+router.patch('/weight-tiers/:id', updateWeightTier);
+router.delete('/weight-tiers/:id', deleteWeightTier);
+
+// ============================================================
+// NEW — Dynamic Shipping: Shipping Criteria (for 'special' categories)
+// ============================================================
+router.get('/shipping-criteria', getAllShippingCriteriaAdmin); // ?category=:id
+router.post('/shipping-criteria', createShippingCriteria);
+router.patch('/shipping-criteria/:id', updateShippingCriteria);
+router.delete('/shipping-criteria/:id', deleteShippingCriteria);
+
 // ============================================================
 // Ads
 // ============================================================

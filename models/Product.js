@@ -31,6 +31,21 @@ const deliveryChargeSchema = new Schema(
   { _id: false }
 );
 
+// ============================================================
+// NEW — per-product shipping-criteria selection (only meaningful when
+// shippingType === 'special'). Stores ONLY references to the admin-managed
+// ShippingCriteria/option — price and label are always resolved live at
+// quote/order time via utils/shippingFeeCalculator.js, never cached here,
+// so admin price edits apply to every future checkout immediately.
+// ============================================================
+const shippingCriteriaSelectionSchema = new Schema(
+  {
+    criteria: { type: Schema.Types.ObjectId, ref: 'ShippingCriteria', required: true },
+    option: { type: Schema.Types.ObjectId, required: true }, // subdocument _id inside ShippingCriteria.options
+  },
+  { _id: false }
+);
+
 const productSchema = new Schema(
   {
     seller: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -87,16 +102,43 @@ const productSchema = new Schema(
     },
 
     // ---------------------------------------------------------------
-    // NEW — Low-stock reminder settings (seller-configurable, drives the
+    // NEW — DYNAMIC SHIPPING (replaces the old region/town-only transport
+    // model for anything that isn't a self-delivering 'heavy' wholesaler).
+    //
+    // shippingType is a SNAPSHOT of the category's resolved classification
+    // at the moment the product was last saved (see
+    // resolveCategoryShippingType() in categoryController.js, called from
+    // productController on create/update whenever the category changes).
+    // It exists on the product purely so we know which of the two fields
+    // below to expect/validate/render — the AUTHORITATIVE shipping-type
+    // check at quote/order time always re-resolves live from the category,
+    // never trusts this snapshot alone (an admin re-specializing a category
+    // must retroactively affect every product in it).
+    //
+        //   'normal'  -> weightKg is required, used against WeightTier
+        //   'special' -> shippingCriteriaSelections is required (per the
+        //                category's ShippingCriteria groups), used against
+        //                each selected option's live price
+        //
+        // A seller with deliveryType 'heavy' (their own transport terms) is
+        // ALWAYS excluded from this system entirely, exactly like they're
+        // excluded from the old standard Transport fee — see
+        // utils/shippingFeeCalculator.js.
+    // ---------------------------------------------------------------
+    shippingType: {
+      type: String,
+      enum: ['normal', 'special'],
+      default: 'normal',
+    },
+    weightKg: { type: Number, default: null, min: 0 },
+    shippingCriteriaSelections: {
+      type: [shippingCriteriaSelectionSchema],
+      default: [],
+    },
+
+    // ---------------------------------------------------------------
+    // Low-stock reminder settings (seller-configurable, drives the
     // "Manage Stock" panel on the seller dashboard's Analytics page).
-    //   - stockReminderEnabled:  whether this product's stock is being watched at all
-    //   - stockReminderThreshold: the seller-chosen quantity ("remind me at <= X")
-    //   - lastStockReminderSentAt: bookkeeping only — null means "not currently
-    //     in a low-stock alert state" (either never dropped below threshold, or
-    //     it dropped and has since been restocked above it, re-arming future
-    //     alerts). Non-null means an email has already gone out for the CURRENT
-    //     dip and is still being periodically re-sent by the scheduler until
-    //     the seller restocks (see utils/stockReminderService.js).
     // ---------------------------------------------------------------
     stockReminderEnabled: { type: Boolean, default: false },
     stockReminderThreshold: { type: Number, default: 5, min: 0 },
@@ -147,7 +189,9 @@ productSchema.index({ status: 1, isActive: 1, category: 1 });
 productSchema.index({ status: 1, isHotDeal: 1 });
 productSchema.index({ status: 1, sellerRole: 1, freeDelivery: 1 });
 productSchema.index({ name: 'text', description: 'text' });
-// NEW — used by the scheduler's recheckAllLowStockProducts() sweep
+// used by the scheduler's recheckAllLowStockProducts() sweep
 productSchema.index({ stockReminderEnabled: 1, isActive: 1, lastStockReminderSentAt: 1 });
+// NEW — used by dashboards/reporting that need to split normal vs special shipping products
+productSchema.index({ shippingType: 1, status: 1, isActive: 1 });
 
 module.exports = mongoose.model('Product', productSchema);

@@ -13,7 +13,7 @@ const {
   getMyProductAnalytics,
   getMyStockOverview,
   updateStockReminderSettings,
-  bulkUpdateStockReminderSettings, // NEW
+  bulkUpdateStockReminderSettings,
 } = require('../controllers/productController');
 const { createReview, getProductReviews } = require('../controllers/reviewController');
 const { protect, authorize } = require('../middleware/authMiddleware');
@@ -28,9 +28,12 @@ router.get('/', getProducts);
 router.get('/my-products', protect, authorize('wholesaler', 'retailer'), getMyProducts);
 router.get('/analytics', protect, authorize('wholesaler', 'retailer'), getMyProductAnalytics);
 router.get('/stock-overview', protect, authorize('wholesaler', 'retailer'), getMyStockOverview);
-router.patch('/stock-reminder/bulk', protect, authorize('wholesaler', 'retailer'), bulkUpdateStockReminderSettings); // NEW — must stay before '/:id/stock-reminder'
+router.patch('/stock-reminder/bulk', protect, authorize('wholesaler', 'retailer'), bulkUpdateStockReminderSettings); // must stay before '/:id/stock-reminder'
 router.get('/suggestions', getProductSuggestions);
 
+// createProduct/updateProduct now also accept: weightKg (normal categories)
+// or shippingCriteriaSelections (JSON string, special categories) — see
+// productController's validateAndPrepareShipping().
 router.post('/', protect, requireApprovedSeller, uploadProductImages, createProduct);
 
 router.get('/:id', getProductById);

@@ -8,8 +8,10 @@ const {
   updateCategory,
   deleteCategory,
   getCategoryCommission,
+  getCategoryShippingType, // NEW
 } = require('../controllers/categoryController');
 const { getCategoryAttributes } = require('../controllers/categoryAttributeController');
+const { getCategoryShippingCriteria } = require('../controllers/shippingCriteriaController'); // NEW
 const { protect, authorize } = require('../middleware/authMiddleware');
 const { uploadSingleImage } = require('../middleware/uploadMiddleware');
 
@@ -18,13 +20,18 @@ router.get('/', getCategories);
 router.get('/tree', getCategoryTree);
 
 // Which attributes apply to this category (used by the seller product form + storefront filters).
-// Safe ahead of /:slug since it's a two-segment path ("/:id/attributes"), not a single slug.
 router.get('/:id/attributes', getCategoryAttributes);
 
-// Effective marketplace commission for this category (own rate, inherited, or
-// platform default). Also a two-segment path, safe ahead of /:slug. Public so
-// sellers can see it live while picking a category on the product form.
+// Effective marketplace commission for this category (own rate, inherited, or platform default).
 router.get('/:id/commission', getCategoryCommission);
+
+// NEW — Effective shipping classification ('normal' | 'special') for this category.
+router.get('/:id/shipping', getCategoryShippingType);
+
+// NEW — The priced shipping-criteria option groups for this category (only
+// meaningful when its effective shippingType is 'special', but safe to call
+// regardless — simply returns an empty list otherwise).
+router.get('/:id/shipping-criteria', getCategoryShippingCriteria);
 
 router.get('/:slug', getCategoryBySlug);
 

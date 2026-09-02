@@ -3,12 +3,14 @@ const Product = require('../models/Product');
 const ProductVariant = require('../models/ProductVariant');
 const ProductView = require('../models/ProductView');
 const Category = require('../models/Category');
+const ShippingCriteria = require('../models/ShippingCriteria');
 const { User } = require('../models/User');
 const sendEmail = require('../utils/sendEmail');
 const { productSubmittedAdminTemplate } = require('../utils/emailTemplates');
 const { isLeafCategory, getCategoryAttributeDefs } = require('./categoryAttributeController');
+const { resolveCategoryShippingType } = require('./categoryController');
 const { getApprovedShopForSeller } = require('./shopController');
-const { checkAndSendStockReminder } = require('../utils/stockReminderService'); // NEW
+const { checkAndSendStockReminder } = require('../utils/stockReminderService');
 
 async function getAdminEmails() {
   if (process.env.ADMIN_EMAILS) {
@@ -266,6 +268,82 @@ function validateAndPrepareWholesaleFields(role, body) {
   return { deliveryType, minOrderQuantity, pricingTiers, freeDelivery, deliveryCharge };
 }
 
+// ============================================================
+// NEW — DYNAMIC SHIPPING VALIDATION
+// ------------------------------------------------------------
+// Resolves the category's EFFECTIVE shipping classification (live,
+// inheritance-aware — see resolveCategoryShippingType) and validates/
+// prepares whichever of the two shipping field sets applies:
+//   'normal'  -> weightKg (required, > 0)
+//   'special' -> shippingCriteriaSelections, validated against the
+//                category's actual ShippingCriteria groups (one
+//                selection per required group; must reference a real,
+//                active option)
+//
+// A wholesaler product with deliveryType 'heavy' still gets a
+// shippingType/weightKg recorded (for consistency/reporting), but it is
+// never actually required, since heavy-wholesale items are excluded from
+// the dynamic shipping calculation entirely (see shippingFeeCalculator.js).
+// We still validate normally here so that if a seller later flips their
+// product to 'simple' delivery, the shipping data is already correct.
+// ============================================================
+async function validateAndPrepareShipping(categoryId, body) {
+  const { shippingType } = await resolveCategoryShippingType(categoryId);
+
+  if (shippingType === 'normal') {
+    const weightKg = Number(body.weightKg);
+    if (Number.isNaN(weightKg) || weightKg <= 0) {
+      const err = new Error('Weight (kg) is required for products in this category, and must be greater than 0');
+      err.status = 400;
+      throw err;
+    }
+    return { shippingType, weightKg, shippingCriteriaSelections: [] };
+  }
+
+  // 'special'
+  const groups = await ShippingCriteria.find({ category: categoryId, isActive: true });
+
+  let rawSelections = [];
+  if (body.shippingCriteriaSelections !== undefined && body.shippingCriteriaSelections !== '') {
+    try {
+      rawSelections =
+        typeof body.shippingCriteriaSelections === 'string'
+          ? JSON.parse(body.shippingCriteriaSelections)
+          : body.shippingCriteriaSelections;
+    } catch (e) {
+      const err = new Error('shippingCriteriaSelections must be valid JSON');
+      err.status = 400;
+      throw err;
+    }
+  }
+  if (!Array.isArray(rawSelections)) rawSelections = [];
+
+  const selections = [];
+  for (const group of groups) {
+    const match = rawSelections.find((s) => String(s.criteria) === String(group._id));
+
+    if (!match || !match.option) {
+      if (group.isRequired) {
+        const err = new Error(`Please select "${group.name}" for shipping`);
+        err.status = 400;
+        throw err;
+      }
+      continue;
+    }
+
+    const option = group.options.id(match.option);
+    if (!option || !option.isActive) {
+      const err = new Error(`The selected option for "${group.name}" is not valid`);
+      err.status = 400;
+      throw err;
+    }
+
+    selections.push({ criteria: group._id, option: option._id });
+  }
+
+  return { shippingType, weightKg: null, shippingCriteriaSelections: selections };
+}
+
 // @desc    Seller creates a new product (starts as 'draft')
 // @route   POST /api/products
 // @access  Private (wholesaler, retailer)
@@ -333,13 +411,19 @@ const createProduct = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  // NEW — dynamic shipping validation (weight vs criteria, resolved live from category)
+  let shipping;
+  try {
+    shipping = await validateAndPrepareShipping(category, req.body);
+  } catch (err) {
+    res.status(err.status || 400);
+    throw err;
+  }
+
   const approvedShop = await getApprovedShopForSeller(req.user._id);
 
   const images = req.files.map((file) => file.path);
 
-  // NEW — stock reminder settings, optional at creation time. Sellers can
-  // also set/edit these later from the "Manage Stock" panel via the
-  // dedicated PATCH /api/products/:id/stock-reminder endpoint below.
   let stockReminderEnabled = false;
   if (req.body.stockReminderEnabled !== undefined) {
     stockReminderEnabled = req.body.stockReminderEnabled === true || req.body.stockReminderEnabled === 'true';
@@ -368,6 +452,10 @@ const createProduct = asyncHandler(async (req, res) => {
     pricingTiers: wholesale.pricingTiers,
     freeDelivery: wholesale.freeDelivery,
     deliveryCharge: wholesale.deliveryCharge,
+    // NEW — dynamic shipping
+    shippingType: shipping.shippingType,
+    weightKg: shipping.weightKg,
+    shippingCriteriaSelections: shipping.shippingCriteriaSelections,
     stockReminderEnabled,
     stockReminderThreshold,
   });
@@ -376,8 +464,6 @@ const createProduct = asyncHandler(async (req, res) => {
     await ProductVariant.insertMany(prepared.variants.map((v) => ({ ...v, product: product._id })));
   }
 
-  // Fire-and-forget: covers the (unusual but possible) case of creating a
-  // product that's already at/below its own reminder threshold.
   checkAndSendStockReminder(product._id).catch(() => {});
 
   const populated = await Product.findById(product._id)
@@ -417,6 +503,7 @@ const updateProduct = asyncHandler(async (req, res) => {
     if (req.body[field] !== undefined) product[field] = req.body[field];
   });
 
+  let categoryChanged = false;
   if (req.body.category) {
     const categoryDoc = await Category.findById(req.body.category);
     if (!categoryDoc || !categoryDoc.isActive) {
@@ -428,6 +515,7 @@ const updateProduct = asyncHandler(async (req, res) => {
       res.status(400);
       throw new Error('Please choose the most specific category (one with no further subcategories).');
     }
+    categoryChanged = String(req.body.category) !== String(product.category);
     product.category = req.body.category;
   }
 
@@ -489,6 +577,24 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.deliveryCharge = wholesale.deliveryCharge;
   }
 
+  // NEW — dynamic shipping revalidation. Re-run whenever the category
+  // changed (classification may now differ) OR the seller explicitly sent
+  // new shipping fields (weightKg / shippingCriteriaSelections).
+  const shippingKeysSent =
+    categoryChanged || req.body.weightKg !== undefined || req.body.shippingCriteriaSelections !== undefined;
+  if (shippingKeysSent) {
+    let shipping;
+    try {
+      shipping = await validateAndPrepareShipping(effectiveCategory, req.body);
+    } catch (err) {
+      res.status(err.status || 400);
+      throw err;
+    }
+    product.shippingType = shipping.shippingType;
+    product.weightKg = shipping.weightKg;
+    product.shippingCriteriaSelections = shipping.shippingCriteriaSelections;
+  }
+
   const approvedShop = await getApprovedShopForSeller(req.user._id);
   product.shop = approvedShop ? approvedShop._id : null;
 
@@ -509,8 +615,6 @@ const updateProduct = asyncHandler(async (req, res) => {
 
   await product.save();
 
-  // NEW — stock may have just changed (directly, or via a variant total
-  // recompute above); re-evaluate this product's low-stock reminder state.
   checkAndSendStockReminder(product._id).catch(() => {});
 
   const populated = await Product.findById(product._id)
@@ -845,11 +949,9 @@ const getMyProductAnalytics = asyncHandler(async (req, res) => {
   });
 });
 
-// ---------------- MANAGE STOCK (NEW) ----------------
+// ---------------- MANAGE STOCK ----------------
 
-// @desc    Seller's full stock overview for the "Manage Stock" panel —
-//          every active product with its stock, reminder settings, and
-//          whether it's currently in a low-stock state.
+// @desc    Seller's full stock overview for the "Manage Stock" panel.
 // @route   GET /api/products/stock-overview
 // @access  Private (wholesaler, retailer)
 const getMyStockOverview = asyncHandler(async (req, res) => {
@@ -873,10 +975,7 @@ const getMyStockOverview = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Seller sets/updates a product's low-stock reminder settings
-//          (threshold quantity + on/off). Re-evaluates immediately so a
-//          threshold change that instantly puts the product into (or out
-//          of) a low-stock state takes effect right away.
+// @desc    Seller sets/updates a product's low-stock reminder settings.
 // @route   PATCH /api/products/:id/stock-reminder
 // @access  Private (owner only)
 const updateStockReminderSettings = asyncHandler(async (req, res) => {
@@ -905,17 +1004,12 @@ const updateStockReminderSettings = asyncHandler(async (req, res) => {
     product.stockReminderThreshold = threshold;
   }
 
-  // If the new threshold puts current stock back above it, clear any
-  // outstanding alert flag so the NEXT dip sends a fresh reminder.
   if (product.stock > product.stockReminderThreshold) {
     product.lastStockReminderSentAt = null;
   }
 
   await product.save();
 
-  // If saving these settings just put the product into a low-stock state
-  // (or it already was one and reminders were just turned on), send now
-  // rather than waiting for the next stock change or scheduled sweep.
   if (product.stockReminderEnabled && product.stock <= product.stockReminderThreshold) {
     await checkAndSendStockReminder(product._id);
   }
@@ -931,10 +1025,7 @@ const updateStockReminderSettings = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Bulk-set stock reminder settings (enable/disable + threshold) for
-//          many of the seller's own products at once — powers the "Select
-//          all / select individually" hybrid bulk actions on the Manage
-//          Stock panel.
+// @desc    Bulk-set stock reminder settings for many of the seller's own products.
 // @route   PATCH /api/products/stock-reminder/bulk
 // @access  Private (owner only, wholesaler/retailer)
 const bulkUpdateStockReminderSettings = asyncHandler(async (req, res) => {
@@ -963,8 +1054,6 @@ const bulkUpdateStockReminderSettings = asyncHandler(async (req, res) => {
     throw new Error('Nothing to update');
   }
 
-  // Only ever touch products this seller actually owns, even if a stale/
-  // tampered ID list is sent from the client.
   const owned = await Product.find({ _id: { $in: productIds }, seller: req.user._id }).select('_id');
   if (!owned.length) {
     res.status(404);
@@ -974,9 +1063,6 @@ const bulkUpdateStockReminderSettings = asyncHandler(async (req, res) => {
 
   await Product.updateMany({ _id: { $in: ids } }, { $set: update });
 
-  // Re-evaluate each affected product: re-arm reminders that are now back
-  // above threshold, and fire an immediate email for any that just got
-  // switched on (or re-thresholded) into an already-low-stock state.
   const updatedProducts = await Product.find({ _id: { $in: ids } });
   for (const p of updatedProducts) {
     if (p.stock > p.stockReminderThreshold && p.lastStockReminderSentAt) {
@@ -1004,7 +1090,7 @@ module.exports = {
   getProductSuggestions,
   trackProductViewCount,
   getMyProductAnalytics,
-  getMyStockOverview,           // NEW
-  updateStockReminderSettings,  // NEW
-  bulkUpdateStockReminderSettings, // NEW
+  getMyStockOverview,
+  updateStockReminderSettings,
+  bulkUpdateStockReminderSettings,
 };
