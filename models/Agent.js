@@ -14,6 +14,23 @@ const socialMediaSchema = new Schema(
   { _id: false }
 );
 
+// NEW — payout details agents provide so admin can pay out their commission.
+// idNumber is required so it can be cross-checked against the mpesa/bank
+// account name (must match the same registered ID).
+const payoutSchema = new Schema(
+  {
+    method: { type: String, enum: ['mpesa', 'bank'], default: 'mpesa' },
+    idNumber: { type: String, default: '' },
+    mpesaNumber: { type: String, default: '' },
+    mpesaName: { type: String, default: '' },
+    bankName: { type: String, default: '' },
+    accountName: { type: String, default: '' },
+    accountNumber: { type: String, default: '' },
+    branchName: { type: String, default: '' },
+  },
+  { _id: false }
+);
+
 const agentSchema = new Schema(
   {
     // ---------- Identity ----------
@@ -42,6 +59,9 @@ const agentSchema = new Schema(
       default: 'whatsapp',
     },
     socialMedia: { type: socialMediaSchema, default: () => ({}) },
+
+    // NEW — payout / payment details for commission disbursement
+    payout: { type: payoutSchema, default: () => ({}) },
 
     // Kept lightweight for V1 — document upload (ID/KRA/business reg) can be
     // bolted on later using the same Cloudinary pattern as seller verification.

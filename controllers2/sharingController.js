@@ -10,9 +10,6 @@ function logEmailFailure(err, label) {
   console.error(`${label} email failed:`, err.body || err.message);
 }
 
-// @desc    Generate a QR code for any referral link type (spec §29-30)
-// @route   GET /api/sharing/qr?type=general&targetId=&channel=qr
-// @access  Private (agent)
 const getQrCode = asyncHandler(async (req, res) => {
   const { type = 'general', targetId } = req.query;
   const link = buildReferralLink({ agentCode: req.agent.code, type, targetId });
@@ -20,9 +17,6 @@ const getQrCode = asyncHandler(async (req, res) => {
   res.json({ success: true, link, qrDataUrl });
 });
 
-// @desc    Generate a ready-to-send share message for a channel (spec §26-28)
-// @route   POST /api/sharing/message
-// @access  Private (agent)
 const getShareMessage = asyncHandler(async (req, res) => {
   const { channel = 'whatsapp', type = 'general', targetId, leadName } = req.body;
   const link = buildReferralLink({ agentCode: req.agent.code, type, targetId });
@@ -30,12 +24,6 @@ const getShareMessage = asyncHandler(async (req, res) => {
   res.json({ success: true, link, message, channel });
 });
 
-// @desc    Recruit Buyer flow (spec §23) — generates content and logs the
-//          contact as a lead. For WhatsApp the frontend opens wa.me directly
-//          using the returned message; for Email the frontend calls
-//          sendInvite below instead of this, so the email actually sends.
-// @route   POST /api/sharing/recruit-buyer
-// @access  Private (agent)
 const recruitBuyer = asyncHandler(async (req, res) => {
   const { name, phone, email, channel = 'whatsapp' } = req.body;
   const link = buildReferralLink({ agentCode: req.agent.code, type: 'buyer' });
@@ -58,9 +46,6 @@ const recruitBuyer = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, link, message, lead });
 });
 
-// @desc    Recruit Seller flow (spec §24-25)
-// @route   POST /api/sharing/recruit-seller
-// @access  Private (agent)
 const recruitSeller = asyncHandler(async (req, res) => {
   const { name, phone, email, businessName, location, channel = 'whatsapp' } = req.body;
   if (!name) {
@@ -88,12 +73,14 @@ const recruitSeller = asyncHandler(async (req, res) => {
 });
 
 // @desc    Actually SEND a branded recruitment invite email to the intended
-//          person (buyer or seller) — styled like a real marketing email
-//          via Brevo, not a mailto: link. Also logs the recipient as a lead.
+//          person (buyer or seller) via Brevo, and log the recipient as a
+//          lead — now accepts the same optional phone/businessName/location
+//          fields as recruitSeller so the frontend no longer needs a second,
+//          duplicate createLead() call after this one.
 // @route   POST /api/sharing/send-invite
 // @access  Private (agent)
 const sendInvite = asyncHandler(async (req, res) => {
-  const { type, email, name } = req.body;
+  const { type, email, name, phone, businessName, location } = req.body;
   const recruitType = type === 'seller' ? 'seller' : 'buyer';
 
   if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
@@ -119,6 +106,11 @@ const sendInvite = asyncHandler(async (req, res) => {
       sender: 'info',
     });
   } catch (err) {
+    // Surface the real reason to the agent instead of pretending it worked —
+    // if you're seeing "invitation sent" toasts but no email ever arrives,
+    // check this log line first (most likely cause: BREVO_API_KEY missing/
+    // invalid, or the `sender: 'info'` address isn't a verified sender in
+    // your Brevo account — see utils/sendEmail.js).
     logEmailFailure(err, 'Agent recruitment invite');
     res.status(502);
     throw new Error('Could not send the invitation email right now. Please try again shortly.');
@@ -128,7 +120,10 @@ const sendInvite = asyncHandler(async (req, res) => {
     AgentLead.create({
       agent: req.agent._id,
       name,
+      phone: phone || '',
       email,
+      businessName: businessName || '',
+      location: location || '',
       leadType: recruitType,
       source: 'email',
       status: 'invited',
@@ -139,9 +134,6 @@ const sendInvite = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Invitation email sent', link });
 });
 
-// @desc    Promote a specific product (spec §39)
-// @route   POST /api/sharing/products/:productId/promote
-// @access  Private (agent)
 const promoteProduct = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.productId).select('name images status');
   if (!product || product.status !== 'active') {
