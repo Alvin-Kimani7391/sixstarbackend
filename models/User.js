@@ -46,6 +46,23 @@ const userSchema = new Schema(
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true }, // admin can suspend an account
 
+        // ---------- Agent referral attribution (NEW — Affiliate/Agent system) ----------
+    // Set at registration time if the signup came through an agent's referral
+    // link (?ref=CODE) or QR code. Used to attribute seller recruitment and
+    // buyer referrals to the agent who brought them in — see
+    // controllers2/agentController.js. Purely additive, doesn't touch any
+    // existing auth/discriminator logic.
+    referredBy: {
+      agent: { type: Schema.Types.ObjectId, ref: 'Agent', default: null },
+      code: { type: String, default: '' },
+      referralType: {
+        type: String,
+        enum: ['general', 'buyer', 'seller', 'product', 'category', 'campaign'],
+        default: 'general',
+      },
+      referredAt: { type: Date, default: null },
+    },
+
     // ---------- Google Sign-In ----------
     googleId: { type: String, unique: true, sparse: true, select: false },
 

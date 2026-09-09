@@ -87,6 +87,15 @@ app.use('/api/transaction-fees', require('./routes/transactionFeeRoutes'));
 // NEW — Dynamic Shipping (weight-tier / shipping-criteria live quote engine)
 app.use('/api/shipping', require('./routes/shippingRoutes'));
 
+app.use('/api/marketing', require('./routes/marketingRoutes'));
+app.use('/api/campaigns', require('./routes/campaignRoutes'));
+app.use('/api/sharing', require('./routes/sharingRoutes'));
+app.use('/api/recruitment', require('./routes/recruitmentRoutes'));
+app.use('/api/commissions', require('./routes/commissionRoutes'));
+app.use('/api/agent-analytics', require('./routes/analyticsRoutes'));
+app.use('/api/engagement', require('./routes/engagementRoutes'));
+app.use('/api/fraud', require('./routes/fraudRoutes'));
+
 
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 

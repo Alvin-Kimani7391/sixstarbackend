@@ -8,6 +8,7 @@ const FlashSale = require('../models/FlashSale');
 const { User } = require('../models/User');
 const safeSendEmail = require('../utils/safeSendEmail');
 const getAdminEmails = require('../utils/getAdminEmails');
+const commissionService = require('../services/commissionService'); // NEW — Phase 5 commission engine hooks
 const { calculateDynamicShippingFee } = require('../utils/shippingFeeCalculator');
 const {
   orderConfirmationTemplate,
@@ -934,6 +935,15 @@ const updateOrderStatus = asyncHandler(async (req, res) => {
 
   order.orderStatus = orderStatus;
   await order.save();
+
+// NEW — Phase 5 commission engine hooks
+  if (orderStatus === 'delivered') {
+    commissionService.onOrderDelivered(order).catch((err) => console.error('Commission confirm failed:', err));
+  } else if (orderStatus === 'cancelled') {
+    commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel failed:', err));
+    commissionService.onOrderRefunded(order).catch((err) => console.error('Commission reverse failed:', err));
+  }
+
   res.json({ success: true, order });
 
   if (order.buyer?.email) {
@@ -976,6 +986,16 @@ const cancelOrder = asyncHandler(async (req, res) => {
 
   order.orderStatus = 'cancelled';
   await order.save();
+
+    // NEW — Phase 5 commission engine hook. cancelOrder only ever fires before
+  // an order has shipped/delivered (see the guard above), so any commission
+  // that exists for this order will still be pending/processing — but
+  // calling onOrderRefunded too is harmless (no-op if nothing is confirmed)
+  // and keeps this path consistent with updateOrderStatus's cancellation branch.
+  commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel failed:', err));
+  commissionService.onOrderRefunded(order).catch((err) => console.error('Commission reverse failed:', err));
+
+  // Restore stock — both the aggregate product stock and, if this line had a
 
   // Restore stock — both the aggregate product stock and, if this line had a
   // variant, that variant's own stock (previously only product.stock was restored,

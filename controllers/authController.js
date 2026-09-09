@@ -4,9 +4,12 @@ const asyncHandler = require('express-async-handler');
 const { OAuth2Client } = require('google-auth-library');
 const { User, Wholesaler, Retailer, Buyer, Admin } = require('../models/User');
 const SellerVerification = require('../models/SellerVerification');
+const Agent = require('../models/Agent'); // NEW — referral attribution at signup
 const generateToken = require('../utils/generateToken');
 const sendEmail = require('../utils/sendEmail');
 const { issueEmailOtp } = require('./emailVerificationController');
+const { checkSelfReferral } = require('../services/fraudService'); // NEW
+const { autoTrackConversion } = require('../services/leadService'); // NEW
 const {
   passwordResetEmailTemplate,
   welcomeEmailTemplate,
@@ -74,11 +77,49 @@ function sendWelcomeEmail(user) {
   }).catch((err) => console.error('Welcome email failed:', err.body || err.message));
 }
 
+// ============================================================
+// NEW — Agent referral attribution at signup.
+// ------------------------------------------------------------
+// Accepts either `referralCode` or the shorter `ref` (matching the
+// ?ref=CODE query param your referral links use — see
+// controllers2/agentController.js's getPublicAgentProfile). Looks up an
+// ACTIVE agent by code; if found, snapshots the attribution onto the new
+// user and bumps the agent's buyersReferred/sellersReferred counter.
+//
+// This never blocks registration — an invalid/expired/missing code just
+// means no attribution is recorded, exactly like the existing agentCode
+// flow at checkout in orderController.js.
+// ============================================================
+async function resolveReferralAttribution(rawCode, role) {
+  const code = (rawCode || '').trim().toUpperCase();
+  if (!code) return null;
+
+  const agent = await Agent.findOne({ code, isActive: true });
+  if (!agent) return null;
+
+  const referralType = role === 'buyer' ? 'buyer' : 'seller'; // wholesaler/retailer both count as seller referrals
+
+  return {
+    agentDoc: agent,
+    snapshot: {
+      agent: agent._id,
+      code: agent.code,
+      referralType,
+      referredAt: new Date(),
+    },
+  };
+}
+
+async function bumpAgentReferralStat(agentDoc, role) {
+  const field = role === 'buyer' ? 'buyersReferred' : 'sellersReferred';
+  await Agent.findByIdAndUpdate(agentDoc._id, { $inc: { [field]: 1 } });
+}
+
 // @desc    Register a new user (wholesaler, retailer, or buyer)
 // @route   POST /api/auth/register
 // @access  Public
 const registerUser = asyncHandler(async (req, res) => {
-  const { name, email, phone, password, role, ...rest } = req.body;
+  const { name, email, phone, password, role, referralCode, ref, ...rest } = req.body;
 
   if (!name || !email || !phone || !password || !role) {
     res.status(400);
@@ -109,9 +150,31 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new Error('Shop name is required for retailers');
   }
 
-  const Model = roleModelMap[role];
-  const user = await Model.create({ name, email, phone, password, ...rest });
+  // NEW — resolve referral attribution (if a code was carried through from
+  // a referral link / QR code) before creating the account, so it can be
+  // set at creation time rather than a second write.
+  const attribution = await resolveReferralAttribution(referralCode || ref, role);
 
+  const Model = roleModelMap[role];
+  const user = await Model.create({
+    name,
+    email,
+    phone,
+    password,
+    ...rest,
+    ...(attribution ? { referredBy: attribution.snapshot } : {}),
+  });
+
+  if (attribution) {
+    bumpAgentReferralStat(attribution.agentDoc, role).catch((err) =>
+      console.error('Agent referral stat update failed:', err.message)
+    );
+  }
+  
+  if (attribution) {
+    checkSelfReferral(attribution.agentDoc, user).catch(() => {}); // NEW
+    autoTrackConversion({ agentId: attribution.agentDoc._id, user, leadType: role === 'buyer' ? 'buyer' : 'seller' }).catch(() => {}); // NEW
+  }
   // Session cookie so the frontend can immediately call the protected
   // /auth/email/verify-code endpoint on the next page (verify-email.html)
   // without asking the person to log in again.
@@ -193,15 +256,7 @@ const loginUser = asyncHandler(async (req, res) => {
   await user.save({ validateBeforeSave: false });
 
   // ---------- Email verification gate — applies to EVERY role ----------
-  // Covers brand-new signups who haven't finished the OTP screen yet, AND
-  // pre-existing accounts (created before this feature shipped) that were
-  // never verified. Either way, they don't get past login unverified.
   if (!user.isVerified) {
-    // Issue the session cookie anyway so the frontend can call the
-    // protected /auth/email/* endpoints on the verify-email screen without
-    // a second login. They still can't do anything else meaningful until
-    // isVerified flips to true — every buyer/seller page you gate on the
-    // frontend should check this flag.
     generateToken(res, user._id);
 
     return res.json({
@@ -400,6 +455,10 @@ const googleAuth = asyncHandler(async (req, res) => {
       throw new Error('This account has been suspended. Contact support.');
     }
   } else {
+    // NOTE: Google sign-up is buyer-only in this flow, and doesn't currently
+    // carry a ?ref= code through — if you want agent attribution on Google
+    // sign-ups too, pass `req.body.ref` here the same way registerUser does
+    // and I'll wire it in.
     user = await Buyer.create({
       name,
       email,
@@ -449,7 +508,6 @@ const forgotPassword = asyncHandler(async (req, res) => {
   const resetUrl = `${process.env.FRONTEND_URL}/reset-password.html?token=${rawToken}`;
 
   try {
-    // Password resets go out from noreply@sixstarsuppliers.com.
     await sendEmail({
       to: user.email,
       subject: 'Reset your Six Star Suppliers password',

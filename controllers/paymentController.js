@@ -7,10 +7,8 @@ const getAdminEmails = require('../utils/getAdminEmails');
 const { paymentDecisionTemplate, stkPaymentReceivedAdminTemplate } = require('../utils/emailTemplates');
 const { initiateStkPush: callPayHeroInitiate } = require('../utils/payhero');
 const { interpretMpesaResult } = require('../utils/mpesaErrors');
+const commissionService = require('../services/commissionService'); // NEW
 
-// @desc    Buyer triggers an M-Pesa STK Push prompt for an order they already created
-// @route   POST /api/payments/initiate-stk
-// @access  Private (buyer)
 const initiateStkPush = asyncHandler(async (req, res) => {
   const { orderId, phone } = req.body;
 
@@ -40,18 +38,12 @@ const initiateStkPush = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error('This order has already been paid for');
   }
-  // NEW — guard against retrying a push on an order the payment reaper (or an
-  // admin) already cancelled and released stock for. Without this, a stale
-  // browser tab could push a real M-Pesa PIN prompt for an order whose items
-  // may have already been resold to someone else.
   if (order.orderStatus === 'cancelled') {
     res.status(400);
     throw new Error('This order was cancelled because payment was never completed. Please checkout again.');
   }
 
-  // Normalize to 2547XXXXXXXX / 2541XXXXXXXX — the format PayHero expects.
   const normalizedPhone = phone.startsWith('0') ? `254${phone.slice(1)}` : phone;
-
   const callbackUrl = `${process.env.BACKEND_URL}/api/payments/callback`;
 
   let phResponse;
@@ -88,9 +80,6 @@ const initiateStkPush = asyncHandler(async (req, res) => {
     rawInitiateResponse: phResponse,
   });
 
-  // NEW — clear any stale failure info from a previous failed attempt so the
-  // frontend doesn't briefly show an old "wrong PIN" message while the new
-  // prompt is in flight.
   order.paymentStatus = 'pending_verification';
   order.rejectionReason = '';
   order.stk = {
@@ -111,26 +100,13 @@ const initiateStkPush = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    PayHero webhook — fired automatically once the customer enters (or
-//          cancels) their M-Pesa PIN. This is what actually confirms the order.
-// @route   POST /api/payments/callback
-// @access  Public (server-to-server — PayHero cannot send your app's auth cookie)
 const handleCallback = asyncHandler(async (req, res) => {
-  // Acknowledge immediately — PayHero doesn't need us to finish processing
-  // first, and a slow/failed ack just triggers pointless retries.
   res.status(200).json({ received: true });
 
   try {
     const body = req.body || {};
-    const result = body.response || body; // tolerate either shape
-    const {
-      CheckoutRequestID,
-      MerchantRequestID,
-      ExternalReference,
-      MpesaReceiptNumber,
-      ResultCode,
-      ResultDesc,
-    } = result;
+    const result = body.response || body;
+    const { CheckoutRequestID, MerchantRequestID, ExternalReference, MpesaReceiptNumber, ResultCode, ResultDesc } = result;
 
     if (!CheckoutRequestID && !ExternalReference) {
       console.error('PayHero callback missing identifiers:', body);
@@ -146,13 +122,8 @@ const handleCallback = asyncHandler(async (req, res) => {
       return;
     }
 
-    // Idempotency — PayHero can retry a callback; never double-process a
-    // payment that's already been settled.
     if (payment.status !== 'queued') return;
 
-    // Interpret Safaricom's ResultCode into a clean, buyer-facing reason —
-    // 0 = success, 1 = insufficient balance, 2001 = wrong PIN, 1032 =
-    // cancelled, 1037 = timeout, etc. See utils/mpesaErrors.js.
     const interpreted = interpretMpesaResult(ResultCode, ResultDesc);
     const succeeded = interpreted.type === 'success';
 
@@ -184,26 +155,21 @@ const handleCallback = asyncHandler(async (req, res) => {
       order.mpesaCode = MpesaReceiptNumber || order.mpesaCode;
       order.mpesaMessage = order.mpesaMessage || `M-Pesa STK Push — Receipt ${MpesaReceiptNumber}`;
     } else {
-      // THE FIX — this used to be missing entirely, so a failed payment left
-      // order.paymentStatus stuck at 'pending_verification' forever, making
-      // a wrong-PIN/insufficient-balance order indistinguishable from a
-      // legitimate order still awaiting manual verification. Now it's
-      // explicitly marked 'rejected' the instant M-Pesa says no, and the
-      // buyer gets the exact reason instead of raw Safaricom text.
       order.paymentStatus = 'rejected';
       order.rejectionReason = interpreted.message;
     }
     await order.save();
 
+    if (succeeded) {
+      // NEW — commission engine: create pending buyer/seller-referral commissions now that payment is confirmed.
+      commissionService.onOrderPaymentConfirmed(order).catch((err) => console.error('Commission creation (STK) failed:', err));
+    } else {
+      // NEW — payment failed outright: nothing pending to cancel yet at this point in most
+      // flows, but harmless no-op if a commission somehow already exists.
+      commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel (STK) failed:', err));
+    }
+
     if (succeeded && order.buyer?.email) {
-      // NEW — this is the buyer "order confirmation" + seller "new order,
-      // prepare for dispatch" emails that used to fire prematurely at order
-      // CREATION time (see orderController.js's createOrder). For STK orders
-      // they now fire HERE instead — only once payment is actually confirmed.
-      // skipAdminVerificationAlert: true because the "needs verification"
-      // admin email doesn't apply here — this order is already confirmed,
-      // and the stkPaymentReceivedAdminTemplate email below covers admin
-      // instead, with accurate "already paid" language.
       sendOrderEmails(order, order.buyer, { skipAdminVerificationAlert: true }).catch((err) =>
         console.error('STK order confirmation email dispatch failed:', err)
       );
@@ -231,18 +197,11 @@ const handleCallback = asyncHandler(async (req, res) => {
         );
       });
     }
-    // Deliberately no email at all on failure/cancellation — the buyer is
-    // still on the checkout page and sees it live via the status-polling
-    // endpoint. Sellers and admin never hear about an order that was never
-    // actually paid for.
   } catch (err) {
     console.error('PayHero callback processing error:', err);
   }
 });
 
-// @desc    Buyer polls this while the STK prompt is on their phone
-// @route   GET /api/payments/status/:orderId
-// @access  Private (buyer who owns the order, or admin)
 const checkPaymentStatus = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.orderId);
   if (!order) {
@@ -256,12 +215,8 @@ const checkPaymentStatus = asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
-    paymentStatus: order.paymentStatus, // pending_verification | confirmed | rejected
-    stkStatus: order.stk?.status || '', // '' | queued | success | failed
-    // NEW — machine-readable reason ('wrong_pin' | 'insufficient_funds' |
-    // 'cancelled' | 'timeout' | ...) so the frontend can branch on it
-    // (e.g. show a "top up" CTA for insufficient_funds) instead of only
-    // string-matching rejectionReason.
+    paymentStatus: order.paymentStatus,
+    stkStatus: order.stk?.status || '',
     stkFailureType: order.stk?.failureType || '',
     orderNumber: order.orderNumber,
     orderId: order._id,

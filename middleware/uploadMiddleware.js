@@ -160,6 +160,71 @@ const uploadRFQChat = multer({
 
 const uploadRFQChatImage = uploadRFQChat.single('image');
 
+
+// ---------------------------------------------------------------------------
+// Agent profile photos: separate Cloudinary folder, single image field.
+// ---------------------------------------------------------------------------
+const agentStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'six-star-suppliers/agents',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 800, height: 800, crop: 'limit' }],
+  },
+});
+
+const uploadAgent = multer({
+  storage: agentStorage,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
+const uploadAgentAvatar = uploadAgent.single('avatar');
+
+// ---------------------------------------------------------------------------
+// Marketing Center assets (images/banners/videos/flyers/PDFs) — one combined
+// Cloudinary folder, resource_type 'auto' so images/PDFs/videos all upload
+// through the same field without the seller-verification "raw delivery"
+// bug (see verificationStorage's comment above for why 'auto' matters).
+// ---------------------------------------------------------------------------
+const marketingStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'six-star-suppliers/marketing',
+    resource_type: 'auto',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'pdf'],
+  },
+});
+
+const uploadMarketing = multer({
+  storage: marketingStorage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB — video needs headroom
+});
+
+const uploadMarketingAsset = uploadMarketing.fields([
+  { name: 'file', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 },
+]);
+
+// Brand Kit logo/altLogo — small image uploads, own folder.
+const brandStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'six-star-suppliers/brand',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp', 'svg'],
+    transformation: [{ width: 800, height: 800, crop: 'limit' }],
+  },
+});
+
+const uploadBrand = multer({
+  storage: brandStorage,
+  limits: { fileSize: 3 * 1024 * 1024 },
+});
+
+const uploadBrandAsset = uploadBrand.fields([
+  { name: 'logo', maxCount: 1 },
+  { name: 'altLogo', maxCount: 1 },
+]);
+
 module.exports = {
   uploadProductImages,
   uploadSingleImage,
@@ -168,4 +233,7 @@ module.exports = {
   uploadLegalDocument,
   uploadRFQImage,
   uploadRFQChatImage,
+  uploadAgentAvatar,
+  uploadMarketingAsset,
+  uploadBrandAsset,
 };

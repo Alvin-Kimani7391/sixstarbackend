@@ -7,6 +7,8 @@ const FlashSale = require('../models/FlashSale');
 const TransactionFeeTier = require('../models/TransactionFeeTier');
 const { User } = require('../models/User');
 const safeSendEmail = require('../utils/safeSendEmail');
+const commissionService = require('../services/commissionService'); // NEW
+const { advanceSellerLeadStage } = require('../services/leadService'); // NEW
 const {
   productApprovedTemplate,
   productRejectedTemplate,
@@ -416,6 +418,10 @@ const approveProduct = asyncHandler(async (req, res) => {
   product.reviewedAt = new Date();
 
   await product.save();
+
+    // NEW — commission engine hook
+  commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel failed:', err));
+  
   res.json({ success: true, message: 'Product approved and now live', product });
 
   const seller = await User.findById(product.seller).select('name email');
@@ -565,6 +571,12 @@ const verifyOrderPayment = asyncHandler(async (req, res) => {
   if (decision === 'rejected') order.orderStatus = 'cancelled';
 
   await order.save();
+    // NEW — commission engine hook
+  if (decision === 'confirmed') {
+    commissionService.onOrderPaymentConfirmed(order).catch((err) => console.error('Commission creation failed:', err));
+  } else {
+    commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel failed:', err));
+  }
   res.json({ success: true, order });
 
   if (order.buyer?.email) {
@@ -690,6 +702,13 @@ const recheckStkPayment = asyncHandler(async (req, res) => {
 
   await order.save();
 
+  // NEW — commission engine hook
+  if (succeeded) {
+    commissionService.onOrderPaymentConfirmed(order).catch((err) => console.error('Commission creation failed:', err));
+  } else {
+    commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel failed:', err));
+  }
+
   res.json({
     success: true,
     message: succeeded
@@ -748,6 +767,9 @@ const forceCancelStkOrder = asyncHandler(async (req, res) => {
   order.orderStatus = 'cancelled';
   order.rejectionReason = order.rejectionReason || 'Cancelled by admin — payment was never completed.';
   await order.save();
+
+  // NEW — commission engine hook
+  commissionService.onOrderCancelled(order).catch((err) => console.error('Commission cancel failed:', err));
 
   res.json({ success: true, message: 'Order cancelled and stock restored', order });
 });

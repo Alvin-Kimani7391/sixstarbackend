@@ -955,8 +955,8 @@ function shopDecisionTemplate({ sellerName, shop, decision, reason }) {
 /* ================================================================ */
 /* AGENT EMAILS                                                      */
 /* ================================================================ */
-
-function agentWelcomeTemplate({ name, code }) {
+function agentWelcomeTemplate({ name, code, tempPassword }) {
+  const loginUrl = `${FRONTEND_URL}/agent/login.html`; // ASSUMED
   const bodyHtml = `
     <div style="text-align:center;background:${COLORS.chip};border:2px solid ${COLORS.accent};border-radius:12px;padding:22px;margin:8px 0 20px;">
       <div style="font-size:11px;letter-spacing:1px;color:${COLORS.muted};text-transform:uppercase;margin-bottom:8px;">
@@ -964,9 +964,12 @@ function agentWelcomeTemplate({ name, code }) {
       </div>
       <div style="font-size:26px;font-weight:800;color:${COLORS.accent};letter-spacing:2px;">${code}</div>
     </div>
+    ${tempPassword ? infoCard([['Login Email', 'Use the email this was sent to'], ['Temporary Password', tempPassword]]) : ''}
     <p style="margin:0 0 15px;font-size:14px;color:${COLORS.ink};line-height:1.7;">
       Use this code on every referral so we can track your sales and pay your commission accurately.
+      ${tempPassword ? ' Please log in and change your password as soon as possible.' : ''}
     </p>
+    ${button(loginUrl, 'Go to Agent Dashboard')}
   `;
 
   return baseLayout({
@@ -978,6 +981,143 @@ function agentWelcomeTemplate({ name, code }) {
   });
 }
 
+
+/* ================================================================ */
+/* AGENT PROGRAM EMAILS (NEW — Affiliate/Agent system)               */
+/* ================================================================ */
+
+function agentApplicationReceivedTemplate({ name }) {
+  const bodyHtml = `
+    ${infoCard([['Status', 'Pending Review']])}
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      Our team typically reviews new agent applications within 24–48 hours. We'll email you the moment a decision is made.
+    </p>
+  `;
+  return baseLayout({
+    preheader: `We've received your agent application, ${name}.`,
+    eyebrow: 'Agent Program',
+    title: 'Application Received ✅',
+    intro: `Hi ${name?.split(' ')[0] || 'there'}, thanks for applying to become a ${BRAND_NAME} agent.`,
+    bodyHtml,
+  });
+}
+
+function agentApplicationAdminTemplate({ agent }) {
+  const reviewUrl = `${ADMIN_URL}?section=agents&status=pending`;
+  const bodyHtml = `
+    ${infoCard([
+      ['Name', agent.name],
+      ['Email', agent.email],
+      ['Phone', agent.phone],
+      ['Location', agent.location || 'N/A'],
+    ])}
+    ${button(reviewUrl, 'Review Application', COLORS.warning)}
+  `;
+  return baseLayout({
+    preheader: `${agent.name} applied to become an agent`,
+    eyebrow: 'Admin Alert',
+    title: 'New Agent Application',
+    intro: 'Someone just applied to join the agent program.',
+    bodyHtml,
+  });
+}
+
+function agentApprovedTemplate({ name, code }) {
+  const loginUrl = `${FRONTEND_URL}/agent/login.html`; // ASSUMED
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border:2px solid ${COLORS.accent};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      <div style="font-size:11px;letter-spacing:1px;color:${COLORS.muted};text-transform:uppercase;margin-bottom:8px;">
+        Your Agent Code
+      </div>
+      <div style="font-size:26px;font-weight:800;color:${COLORS.accent};letter-spacing:2px;">${code}</div>
+    </div>
+    <p style="margin:0 0 15px;font-size:14px;color:${COLORS.ink};line-height:1.7;">
+      You're approved! Log in to your dashboard to start sharing your referral links and tracking your commission.
+    </p>
+    ${button(loginUrl, 'Go to Agent Dashboard', COLORS.success)}
+  `;
+  return baseLayout({
+    preheader: `You're approved — your agent code is ${code}`,
+    eyebrow: 'Agent Program',
+    title: "You're Approved! 🎉",
+    intro: `Hi ${name?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+  });
+}
+
+function agentRejectedTemplate({ name, reason }) {
+  const bodyHtml = `
+    ${reasonBox(reason)}
+    <p style="margin:0;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      If you believe this was a mistake or your circumstances have changed, you're welcome to reach out at
+      <a href="mailto:${SUPPORT_EMAIL}" style="color:${COLORS.accentDark};font-weight:600;">${SUPPORT_EMAIL}</a>.
+    </p>
+  `;
+  return baseLayout({
+    preheader: 'An update on your agent application',
+    eyebrow: 'Agent Program',
+    title: 'Application Update',
+    intro: `Hi ${name?.split(' ')[0] || 'there'}, thanks for your interest in becoming an agent.`,
+    bodyHtml,
+  });
+}
+
+function agentStatusChangedTemplate({ name, status }) {
+  const isActive = status === 'active';
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      ${statusBadge(isActive ? 'Active' : 'Suspended', isActive ? 'success' : 'danger')}
+    </div>
+    <p style="margin:0;font-size:14px;line-height:1.6;color:${COLORS.ink};">
+      ${isActive
+        ? 'Your agent account is active again — you can log in and continue sharing your referral links.'
+        : 'Your agent account has been suspended. If you believe this is a mistake, please contact support.'}
+    </p>
+  `;
+  return baseLayout({
+    preheader: isActive ? 'Your agent account is active again' : 'Your agent account has been suspended',
+    eyebrow: 'Agent Program',
+    title: isActive ? 'Account Reactivated' : 'Account Suspended',
+    intro: `Hi ${name?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+  });
+}
+
+function agentBadgeUpgradedTemplate({ name, badgeName, commissionRate }) {
+  const bodyHtml = `
+    <div style="text-align:center;background:${COLORS.chip};border:2px solid ${COLORS.accent};border-radius:12px;padding:22px;margin:8px 0 20px;">
+      <div style="font-size:11px;letter-spacing:1px;color:${COLORS.muted};text-transform:uppercase;margin-bottom:8px;">
+        New Badge
+      </div>
+      <div style="font-size:24px;font-weight:800;color:${COLORS.accent};">${badgeName} Agent</div>
+      <div style="font-size:13px;color:${COLORS.muted};margin-top:6px;">${commissionRate}% commission rate</div>
+    </div>
+  `;
+  return baseLayout({
+    preheader: `You're now a ${badgeName} agent`,
+    eyebrow: 'Agent Program',
+    title: 'Your Badge Changed 🎉',
+    intro: `Hi ${name?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+  });
+}
+
+function agentPasswordResetTemplate({ name, resetUrl }) {
+  const bodyHtml = `
+    <p style="margin:0 0 4px;font-size:13px;color:${COLORS.muted};">
+      This link expires in <strong>15 minutes</strong> for your security.
+    </p>
+    ${button(resetUrl, 'Reset Password')}
+    ${securityWarningBox()}
+  `;
+  return baseLayout({
+    preheader: 'Reset your agent password',
+    eyebrow: 'Security',
+    title: 'Reset Your Agent Password',
+    intro: `Hi ${name?.split(' ')[0] || 'there'}, we received a request to reset your agent account password.`,
+    bodyHtml,
+  });
+}
 
 /* ================================================================ */
 /* CONTACT FORM EMAIL                                                */
@@ -1119,6 +1259,13 @@ module.exports = {
 
     // agents
   agentWelcomeTemplate,
+    agentApplicationReceivedTemplate,
+  agentApplicationAdminTemplate,
+  agentApprovedTemplate,
+  agentRejectedTemplate,
+  agentStatusChangedTemplate,
+  agentBadgeUpgradedTemplate,
+  agentPasswordResetTemplate,
 
   // contact
   contactFormEmailTemplate,
