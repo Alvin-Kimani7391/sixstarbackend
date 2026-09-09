@@ -48,7 +48,11 @@ router.post('/track/:code', trackReferralClick); // referral link click
 // ============================================================
 // AGENT SELF-SERVICE AUTH
 // ============================================================
-router.post('/apply', applyAsAgent);
+// FIX: /apply is submitted as multipart/form-data (it has an optional avatar
+// file field), so it needs the same multer middleware as PATCH /me, or
+// express.json()/urlencoded() never populate req.body and every application
+// fails the "required fields" check before it can create the Agent doc.
+router.post('/apply', uploadAgentAvatar, applyAsAgent);
 router.post('/login', agentLogin);
 router.post('/logout', protectAgent, agentLogout);
 router.post('/forgot-password', forgotAgentPassword);

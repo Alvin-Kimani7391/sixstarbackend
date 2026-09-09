@@ -39,6 +39,9 @@ function safeAgent(agent) {
 // @desc    Public agent application (self-registration)
 // @route   POST /api/agents/apply
 // @access  Public
+// @desc    Public agent application (self-registration)
+// @route   POST /api/agents/apply
+// @access  Public
 const applyAsAgent = asyncHandler(async (req, res) => {
   const {
     name,
@@ -79,8 +82,10 @@ const applyAsAgent = asyncHandler(async (req, res) => {
     phone,
     password,
     location: location || '',
+    bio: req.body.bio || '',
     preferredChannel: preferredChannel || 'whatsapp',
     socialMedia: socialMedia || {},
+    avatar: req.file ? req.file.path : '', // NEW — was silently dropped before
     termsAcceptedAt: new Date(),
     marketingPolicyAcceptedAt: new Date(),
     status: 'pending',
