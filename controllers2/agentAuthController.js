@@ -1,20 +1,31 @@
+const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
 const crypto = require('crypto');
 const Agent = require('../models/Agent');
 const AgentBadge = require('../models/AgentBadge');
-const ReferralClick = require('../models/ReferralClick');
-const Order = require('../models/Order');
 const sendEmail = require('../utils/sendEmail');
+const getAdminEmails = require('../utils/getAdminEmails');
 const {
-  agentWelcomeTemplate,
-  agentApprovedTemplate,
-  agentRejectedTemplate,
-  agentStatusChangedTemplate,
-  agentBadgeUpgradedTemplate,
+  agentApplicationReceivedTemplate,
+  agentApplicationAdminTemplate,
+  agentPasswordResetTemplate,
 } = require('../utils/emailTemplates');
 
 function safeSendEmail(opts, label) {
   sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.body || err.message));
+}
+
+function signAgentToken(agentId) {
+  return jwt.sign({ id: agentId, scope: 'agent' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+}
+
+function setAgentCookie(res, token) {
+  res.cookie('agentToken', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
 }
 
 function safeAgent(agent) {
@@ -25,503 +36,246 @@ function safeAgent(agent) {
   return obj;
 }
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://sixstarsuppliers.com';
-
-// ============================================================
-// PUBLIC
-// ============================================================
-
-// @desc    Get all ACTIVE agents - for the checkout page's agent picker
-// @route   GET /api/agents
+// @desc    Public agent application (self-registration)
+// @route   POST /api/agents/apply
 // @access  Public
-const getActiveAgents = asyncHandler(async (req, res) => {
-  const agents = await Agent.find({ isActive: true }).select('name code').sort('name');
-  res.json({ success: true, count: agents.length, agents });
-});
+const applyAsAgent = asyncHandler(async (req, res) => {
+  const {
+    name,
+    email,
+    phone,
+    password,
+    location,
+    preferredChannel,
+    socialMedia,
+    termsAccepted,
+    marketingPolicyAccepted,
+  } = req.body;
 
-// @desc    Public agent profile page — safe subset of fields only
-// @route   GET /api/agents/public/:slug
-// @access  Public
-const getPublicAgentProfile = asyncHandler(async (req, res) => {
-  const agent = await Agent.findOne({ publicSlug: req.params.slug, isActive: true }).populate('badge', 'name color');
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent page not found');
-  }
-
-  res.json({
-    success: true,
-    agent: {
-      name: agent.name,
-      avatar: agent.avatar,
-      bio: agent.bio,
-      badge: agent.badge,
-      code: agent.code,
-      publicSlug: agent.publicSlug,
-      joinDate: agent.createdAt,
-      referralLinks: {
-        general: `${FRONTEND_URL}/?ref=${agent.code}`,
-        shop: `${FRONTEND_URL}/?ref=${agent.code}&intent=buyer`,
-        sell: `${FRONTEND_URL}/become-a-seller.html?ref=${agent.code}`, // ASSUMED path
-        joinAsAgent: `${FRONTEND_URL}/agent/apply.html?ref=${agent.code}`, // ASSUMED path
-      },
-    },
-  });
-});
-
-// @desc    Record a click on one of an agent's referral links (public, fired
-//          by the frontend the instant a referral URL loads). Foundation for
-//          the full attribution chain — registration/order-time conversion
-//          gets stitched on in later phases via convertedUser.
-// @route   POST /api/agents/track/:code
-// @access  Public
-const trackReferralClick = asyncHandler(async (req, res) => {
-  const agent = await Agent.findOne({ code: req.params.code.toUpperCase(), isActive: true });
-  if (!agent) {
-    // Don't error the page load over a bad/stale referral code — just no-op.
-    return res.status(204).end();
-  }
-
-  const { type = 'general', channel = 'direct', targetId = null, targetModel = '' } = req.body || {};
-
-  await ReferralClick.create({
-    agent: agent._id,
-    agentCode: agent.code,
-    type,
-    channel,
-    targetId: targetId || null,
-    targetModel,
-    ip: req.ip,
-    userAgent: req.headers['user-agent'] || '',
-    referer: req.headers['referer'] || '',
-  });
-
-  await Agent.findByIdAndUpdate(agent._id, { $inc: { referralClickCount: 1 } });
-
-  require('../services/fraudService').checkClickVelocity(agent._id).catch(() => {}); // NEW
-
-  res.status(204).end();
-});
-
-// ============================================================
-// ADMIN — Agent Management
-// ============================================================
-
-// @desc    Get ALL agents including inactive ones, with commission stats
-// @route   GET /api/agents/admin/all?status=pending&badge=<id>&search=
-// @access  Private (admin)
-const getAllAgentsAdmin = asyncHandler(async (req, res) => {
-  const { status, badge, search } = req.query;
-  const filter = {};
-  if (status) filter.status = status;
-  if (badge) filter.badge = badge;
-  if (search && search.trim()) {
-    const q = search.trim();
-    filter.$or = [
-      { name: { $regex: q, $options: 'i' } },
-      { email: { $regex: q, $options: 'i' } },
-      { code: { $regex: q, $options: 'i' } },
-      { phone: { $regex: q, $options: 'i' } },
-    ];
-  }
-
-  const agents = await Agent.find(filter).populate('badge', 'name color commissionRate').sort('-createdAt');
-  res.json({ success: true, count: agents.length, agents: agents.map(safeAgent) });
-});
-
-// @desc    Pending/under-review applications queue
-// @route   GET /api/agents/admin/pending
-// @access  Private (admin)
-const getPendingAgentApplications = asyncHandler(async (req, res) => {
-  const agents = await Agent.find({ status: { $in: ['pending', 'under_review'] } }).sort('createdAt');
-  res.json({ success: true, count: agents.length, agents: agents.map(safeAgent) });
-});
-
-// @desc    Admin creates a new agent directly (skips the application flow) —
-//          code is auto-generated (PF100, PF101, ...), account starts active
-//          immediately, and a temporary password is emailed to the agent.
-// @route   POST /api/agents/admin
-// @access  Private (admin)
-const createAgent = asyncHandler(async (req, res) => {
-  const { name, phone, email, commissionRate, badge } = req.body;
-
-  if (!name || !phone || !email) {
+  if (!name || !email || !phone || !password) {
     res.status(400);
-    throw new Error('Agent name, phone and email are required');
+    throw new Error('Name, email, phone and password are required');
+  }
+  if (password.length < 6) {
+    res.status(400);
+    throw new Error('Password must be at least 6 characters');
+  }
+  if (!termsAccepted || !marketingPolicyAccepted) {
+    res.status(400);
+    throw new Error('You must accept the Terms and the Marketing Policy to apply');
   }
 
-  const tempPassword = crypto.randomBytes(5).toString('hex'); // 10-char temp password
-
-  let badgeDoc = null;
-  if (badge) {
-    badgeDoc = await AgentBadge.findById(badge);
-  } else {
-    badgeDoc = await AgentBadge.findOne({ isDefault: true, isActive: true });
+  const existing = await Agent.findOne({ email: email.toLowerCase().trim() });
+  if (existing) {
+    res.status(400);
+    throw new Error('An agent application already exists for this email');
   }
+
+  const defaultBadge = await AgentBadge.findOne({ isDefault: true, isActive: true });
 
   const agent = await Agent.create({
     name,
-    phone,
     email: email.toLowerCase().trim(),
-    password: tempPassword,
-    commissionRate: commissionRate !== undefined ? commissionRate : badgeDoc?.commissionRate ?? 5,
-    badge: badgeDoc ? badgeDoc._id : null,
-    badgeAssignedAt: badgeDoc ? new Date() : null,
-    agentType: 'admin_created',
-    status: 'active',
-    reviewedAt: new Date(),
-    reviewedBy: req.user._id,
+    phone,
+    password,
+    location: location || '',
+    preferredChannel: preferredChannel || 'whatsapp',
+    socialMedia: socialMedia || {},
     termsAcceptedAt: new Date(),
     marketingPolicyAcceptedAt: new Date(),
+    status: 'pending',
+    agentType: 'standard',
+    badge: defaultBadge ? defaultBadge._id : null,
+    commissionRate: defaultBadge ? defaultBadge.commissionRate : 5,
   });
 
-  res.status(201).json({ success: true, agent: safeAgent(agent) });
+  const token = signAgentToken(agent._id);
+  setAgentCookie(res, token);
+
+  res.status(201).json({ success: true, agent: safeAgent(agent), token });
 
   safeSendEmail(
     {
       to: agent.email,
-      subject: `Your Agent Account - ${agent.code}`,
-      html: agentWelcomeTemplate({ name: agent.name, code: agent.code, tempPassword }),
+      subject: 'Your Agent Application Was Received',
+      html: agentApplicationReceivedTemplate({ name: agent.name }),
       sender: 'info',
     },
-    'Agent welcome (admin-created)'
+    'Agent application received'
   );
+
+  getAdminEmails().then((adminEmails) => {
+    adminEmails.forEach((to) => {
+      safeSendEmail(
+        {
+          to,
+          subject: `New Agent Application - ${agent.name}`,
+          html: agentApplicationAdminTemplate({ agent }),
+          sender: 'info',
+        },
+        'Agent application (admin alert)'
+      );
+    });
+  });
 });
 
-// @desc    Approve a pending/under-review application
-// @route   PATCH /api/agents/admin/:id/approve
-// @access  Private (admin)
-const approveAgentApplication = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
-  }
-  if (!['pending', 'under_review'].includes(agent.status)) {
+// @desc    Agent login
+// @route   POST /api/agents/login
+// @access  Public
+const agentLogin = asyncHandler(async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
     res.status(400);
-    throw new Error('Only pending or under-review applications can be approved');
+    throw new Error('Email and password are required');
   }
 
-  if (!agent.badge) {
-    const defaultBadge = await AgentBadge.findOne({ isDefault: true, isActive: true });
-    if (defaultBadge) {
-      agent.badge = defaultBadge._id;
-      agent.commissionRate = defaultBadge.commissionRate;
-      agent.badgeAssignedAt = new Date();
-    }
+  const agent = await Agent.findOne({ email: email.toLowerCase().trim() }).select('+password');
+  if (!agent || !(await agent.matchPassword(password))) {
+    res.status(401);
+    throw new Error('Invalid email or password');
+  }
+  if (['rejected', 'deactivated'].includes(agent.status)) {
+    res.status(403);
+    throw new Error('This agent account is no longer active. Contact support for help.');
   }
 
-  agent.status = 'active';
-  agent.reviewedBy = req.user._id;
-  agent.reviewedAt = new Date();
-  agent.rejectionReason = '';
+  agent.lastLoginAt = new Date();
   await agent.save();
 
-  res.json({ success: true, agent: safeAgent(agent) });
+  const token = signAgentToken(agent._id);
+  setAgentCookie(res, token);
 
-  safeSendEmail(
-    {
-      to: agent.email,
-      subject: `You're Approved - Welcome to the Agent Program`,
-      html: agentApprovedTemplate({ name: agent.name, code: agent.code }),
-      sender: 'info',
-    },
-    'Agent approved'
-  );
+  res.json({ success: true, agent: safeAgent(agent), token });
 });
 
-// @desc    Move an application to under_review (optional intermediate step)
-// @route   PATCH /api/agents/admin/:id/review
-// @access  Private (admin)
-const markAgentUnderReview = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
-  }
-  if (agent.status !== 'pending') {
-    res.status(400);
-    throw new Error('Only pending applications can be moved to under review');
-  }
-  agent.status = 'under_review';
-  await agent.save();
+// @desc    Agent logout
+// @route   POST /api/agents/logout
+// @access  Private (agent)
+const agentLogout = asyncHandler(async (req, res) => {
+  res.cookie('agentToken', '', { httpOnly: true, expires: new Date(0) });
+  res.json({ success: true, message: 'Logged out' });
+});
+
+// @desc    Get my own agent profile (full, private view)
+// @route   GET /api/agents/me
+// @access  Private (agent)
+const getMyAgentProfile = asyncHandler(async (req, res) => {
+  const agent = await Agent.findById(req.agent._id).populate('badge');
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Reject a pending/under-review application
-// @route   PATCH /api/agents/admin/:id/reject
-// @access  Private (admin)
-const rejectAgentApplication = asyncHandler(async (req, res) => {
-  const { reason } = req.body;
-  if (!reason) {
-    res.status(400);
-    throw new Error('A rejection reason is required');
-  }
-
-  const agent = await Agent.findById(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
-  }
-  if (!['pending', 'under_review'].includes(agent.status)) {
-    res.status(400);
-    throw new Error('Only pending or under-review applications can be rejected');
-  }
-
-  agent.status = 'rejected';
-  agent.rejectionReason = reason;
-  agent.reviewedBy = req.user._id;
-  agent.reviewedAt = new Date();
-  await agent.save();
-
-  res.json({ success: true, agent: safeAgent(agent) });
-
-  safeSendEmail(
-    {
-      to: agent.email,
-      subject: 'Update on Your Agent Application',
-      html: agentRejectedTemplate({ name: agent.name, reason }),
-      sender: 'info',
-    },
-    'Agent rejected'
-  );
-});
-
-// @desc    Suspend an active agent (blocks login-gated features, keeps history)
-// @route   PATCH /api/agents/admin/:id/suspend
-// @access  Private (admin)
-const suspendAgent = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
-  }
-  agent.status = 'suspended';
-  await agent.save();
-  res.json({ success: true, agent: safeAgent(agent) });
-
-  safeSendEmail(
-    {
-      to: agent.email,
-      subject: 'Your Agent Account Has Been Suspended',
-      html: agentStatusChangedTemplate({ name: agent.name, status: 'suspended' }),
-      sender: 'info',
-    },
-    'Agent suspended'
-  );
-});
-
-// @desc    Reactivate a suspended agent
-// @route   PATCH /api/agents/admin/:id/reactivate
-// @access  Private (admin)
-const reactivateAgent = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
-  }
-  if (agent.status !== 'suspended') {
-    res.status(400);
-    throw new Error('Only suspended agents can be reactivated');
-  }
-  agent.status = 'active';
-  await agent.save();
-  res.json({ success: true, agent: safeAgent(agent) });
-
-  safeSendEmail(
-    {
-      to: agent.email,
-      subject: 'Your Agent Account Is Active Again',
-      html: agentStatusChangedTemplate({ name: agent.name, status: 'active' }),
-      sender: 'info',
-    },
-    'Agent reactivated'
-  );
-});
-
-// @desc    Admin updates an agent's details, including manually assigning a badge
-// @route   PUT /api/agents/admin/:id
-// @access  Private (admin)
-const updateAgent = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.params.id);
+// @desc    Update my own agent profile
+// @route   PATCH /api/agents/me
+// @access  Private (agent)
+const updateMyAgentProfile = asyncHandler(async (req, res) => {
+  const agent = await Agent.findById(req.agent._id);
   if (!agent) {
     res.status(404);
     throw new Error('Agent not found');
   }
 
-  const editableFields = ['name', 'phone', 'email', 'commissionRate', 'location', 'bio', 'agentType'];
+  const editableFields = ['name', 'phone', 'bio', 'location', 'preferredChannel'];
   editableFields.forEach((field) => {
     if (req.body[field] !== undefined) agent[field] = req.body[field];
   });
-
-  if (req.body.badge !== undefined) {
-    const oldBadgeId = agent.badge ? agent.badge.toString() : null;
-    if (req.body.badge === null || req.body.badge === '') {
-      agent.badge = null;
-    } else {
-      const badgeDoc = await AgentBadge.findById(req.body.badge);
-      if (!badgeDoc) {
-        res.status(400);
-        throw new Error('Badge not found');
-      }
-      agent.badge = badgeDoc._id;
-      agent.commissionRate = badgeDoc.commissionRate;
-      agent.badgeAssignedAt = new Date();
-
-      if (oldBadgeId !== badgeDoc._id.toString() && agent.email) {
-        safeSendEmail(
-          {
-            to: agent.email,
-            subject: `You've Been Upgraded to ${badgeDoc.name} Agent 🎉`,
-            html: agentBadgeUpgradedTemplate({
-              name: agent.name,
-              badgeName: badgeDoc.name,
-              commissionRate: badgeDoc.commissionRate,
-            }),
-            sender: 'info',
-          },
-          'Agent badge changed'
-        );
-      }
-    }
+  if (req.body.socialMedia !== undefined) {
+    agent.socialMedia = { ...(agent.socialMedia?.toObject?.() || {}), ...req.body.socialMedia };
+  }
+  if (req.file) {
+    agent.avatar = req.file.path;
   }
 
   await agent.save();
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Admin deletes an agent (past orders keep their agentCode snapshot regardless)
-// @route   DELETE /api/agents/admin/:id
-// @access  Private (admin)
-const deleteAgent = asyncHandler(async (req, res) => {
-  const agent = await Agent.findByIdAndDelete(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
+// @desc    Change my agent password
+// @route   PUT /api/agents/change-password
+// @access  Private (agent)
+const changeAgentPassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  const agent = await Agent.findById(req.agent._id).select('+password');
+  if (!agent || !(await agent.matchPassword(currentPassword))) {
+    res.status(401);
+    throw new Error('Current password is incorrect');
   }
-  res.json({ success: true, message: 'Agent deleted' });
-});
-
-// @desc    Get every order placed with a specific agent's code
-// @route   GET /api/agents/admin/:id/orders
-// @access  Private (admin)
-const getAgentOrders = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.params.id);
-  if (!agent) {
-    res.status(404);
-    throw new Error('Agent not found');
-  }
-
-  const orders = await Order.find({ agent: agent._id })
-    .populate('buyer', 'name phone email')
-    .sort('-createdAt');
-
-  res.json({ success: true, agent: safeAgent(agent), count: orders.length, orders });
-});
-
-// @desc    Referral click log for a specific agent (admin oversight)
-// @route   GET /api/agents/admin/:id/clicks?page=&limit=
-// @access  Private (admin)
-const getAgentReferralClicks = asyncHandler(async (req, res) => {
-  const { page = 1, limit = 50 } = req.query;
-  const skip = (Number(page) - 1) * Number(limit);
-
-  const [clicks, total] = await Promise.all([
-    ReferralClick.find({ agent: req.params.id }).sort('-createdAt').skip(skip).limit(Number(limit)),
-    ReferralClick.countDocuments({ agent: req.params.id }),
-  ]);
-
-  res.json({ success: true, count: clicks.length, total, page: Number(page), clicks });
-});
-
-// ============================================================
-// ADMIN — Badge Management
-// ============================================================
-
-// @desc    All badges (active + inactive) for the admin screen
-// @route   GET /api/agents/admin/badges
-// @access  Private (admin)
-const getAllBadgesAdmin = asyncHandler(async (req, res) => {
-  const badges = await AgentBadge.find().sort('sortOrder');
-  res.json({ success: true, count: badges.length, badges });
-});
-
-// @desc    Create a badge tier
-// @route   POST /api/agents/admin/badges
-// @access  Private (admin)
-const createBadge = asyncHandler(async (req, res) => {
-  const { name, slug, color, commissionRate, requirements, sortOrder, isDefault, isActive } = req.body;
-
-  if (!name || !slug || commissionRate === undefined) {
+  if (!newPassword || newPassword.length < 6) {
     res.status(400);
-    throw new Error('name, slug and commissionRate are required');
+    throw new Error('New password must be at least 6 characters');
   }
-
-  const badge = await AgentBadge.create({
-    name,
-    slug: slug.toLowerCase().trim(),
-    color,
-    commissionRate,
-    requirements,
-    sortOrder,
-    isDefault: !!isDefault,
-    isActive: isActive !== undefined ? isActive : true,
-  });
-
-  res.status(201).json({ success: true, badge });
+  agent.password = newPassword;
+  await agent.save();
+  res.json({ success: true, message: 'Password updated' });
 });
 
-// @desc    Update a badge tier
-// @route   PATCH /api/agents/admin/badges/:id
-// @access  Private (admin)
-const updateBadge = asyncHandler(async (req, res) => {
-  const badge = await AgentBadge.findById(req.params.id);
-  if (!badge) {
-    res.status(404);
-    throw new Error('Badge not found');
+// @desc    Request a password reset link
+// @route   POST /api/agents/forgot-password
+// @access  Public
+const forgotAgentPassword = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  const agent = await Agent.findOne({ email: (email || '').toLowerCase().trim() });
+
+  // Always respond success so this endpoint can't be used to enumerate agent emails
+  if (!agent) {
+    return res.json({ success: true, message: 'If that email exists, a reset link has been sent' });
   }
 
-  const editableFields = ['name', 'slug', 'color', 'commissionRate', 'requirements', 'sortOrder', 'isDefault', 'isActive'];
-  editableFields.forEach((field) => {
-    if (req.body[field] !== undefined) badge[field] = req.body[field];
-  });
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  agent.resetPasswordToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+  agent.resetPasswordExpire = Date.now() + 15 * 60 * 1000;
+  await agent.save();
 
-  await badge.save();
-  res.json({ success: true, badge });
+  const resetUrl = `${process.env.FRONTEND_URL || 'https://sixstarsuppliers.com'}/agent/reset-password.html?token=${rawToken}`;
+
+  safeSendEmail(
+    {
+      to: agent.email,
+      subject: 'Reset Your Agent Password',
+      html: agentPasswordResetTemplate({ name: agent.name, resetUrl }),
+      sender: 'noreply',
+    },
+    'Agent password reset'
+  );
+
+  res.json({ success: true, message: 'If that email exists, a reset link has been sent' });
 });
 
-// @desc    Delete a badge tier — agents on this badge fall back to their
-//          flat commissionRate until reassigned; nothing else cascades.
-// @route   DELETE /api/agents/admin/badges/:id
-// @access  Private (admin)
-const deleteBadge = asyncHandler(async (req, res) => {
-  const badge = await AgentBadge.findByIdAndDelete(req.params.id);
-  if (!badge) {
-    res.status(404);
-    throw new Error('Badge not found');
+// @desc    Reset password using the emailed token
+// @route   POST /api/agents/reset-password
+// @access  Public
+const resetAgentPassword = asyncHandler(async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword || newPassword.length < 6) {
+    res.status(400);
+    throw new Error('A valid token and a password of at least 6 characters are required');
   }
-  await Agent.updateMany({ badge: badge._id }, { $set: { badge: null } });
-  res.json({ success: true, message: 'Badge deleted' });
+
+  const hashed = crypto.createHash('sha256').update(token).digest('hex');
+  const agent = await Agent.findOne({
+    resetPasswordToken: hashed,
+    resetPasswordExpire: { $gt: Date.now() },
+  });
+
+  if (!agent) {
+    res.status(400);
+    throw new Error('This reset link is invalid or has expired');
+  }
+
+  agent.password = newPassword;
+  agent.resetPasswordToken = undefined;
+  agent.resetPasswordExpire = undefined;
+  await agent.save();
+
+  res.json({ success: true, message: 'Password reset — please log in' });
 });
 
 module.exports = {
-  getActiveAgents,
-  getPublicAgentProfile,
-  trackReferralClick,
-  getAllAgentsAdmin,
-  getPendingAgentApplications,
-  createAgent,
-  approveAgentApplication,
-  markAgentUnderReview,
-  rejectAgentApplication,
-  suspendAgent,
-  reactivateAgent,
-  updateAgent,
-  deleteAgent,
-  getAgentOrders,
-  getAgentReferralClicks,
-  getAllBadgesAdmin,
-  createBadge,
-  updateBadge,
-  deleteBadge,
+  applyAsAgent,
+  agentLogin,
+  agentLogout,
+  getMyAgentProfile,
+  updateMyAgentProfile,
+  changeAgentPassword,
+  forgotAgentPassword,
+  resetAgentPassword,
 };
