@@ -1118,6 +1118,30 @@ function agentPasswordResetTemplate({ name, resetUrl }) {
     bodyHtml,
   });
 }
+function agentRecruitmentInviteTemplate({ agentName, recipientName, type, link }) {
+  const isBuyer = type !== 'seller';
+  const bodyHtml = `
+    <p style="margin:0 0 4px;font-size:14px;line-height:1.7;color:${COLORS.ink};">
+      ${isBuyer
+        ? `${agentName} thinks you'd love shopping on ${BRAND_NAME} — thousands of products from verified wholesalers and retailers, with fast delivery and secure M-Pesa checkout.`
+        : `${agentName} thinks you'd be a great fit to sell on ${BRAND_NAME} — reach more customers, manage your own storefront, and get paid securely.`}
+    </p>
+    ${button(link, isBuyer ? 'Start Shopping' : 'Become a Seller')}
+    <p style="margin:0;font-size:12px;color:${COLORS.muted};word-break:break-all;">
+      Or paste this link into your browser:<br>${link}
+    </p>
+  `;
+  return baseLayout({
+    preheader: `You're invited to join ${BRAND_NAME}`,
+    eyebrow: "You're Invited",
+    title: isBuyer ? "You're Invited to Shop 🛍️" : "You're Invited to Sell 🏬",
+    intro: `Hi ${recipientName?.split(' ')[0] || 'there'},`,
+    bodyHtml,
+    footerNote: `Invited by ${agentName} — a ${BRAND_NAME} agent.`,
+  });
+}
+
+
 
 /* ================================================================ */
 /* CONTACT FORM EMAIL                                                */
@@ -1266,6 +1290,7 @@ module.exports = {
   agentStatusChangedTemplate,
   agentBadgeUpgradedTemplate,
   agentPasswordResetTemplate,
+  agentRecruitmentInviteTemplate,
 
   // contact
   contactFormEmailTemplate,

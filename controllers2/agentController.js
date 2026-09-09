@@ -25,7 +25,7 @@ function safeAgent(agent) {
   return obj;
 }
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://sixstarsuppliers.com';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.sixstarsuppliers.com';
 
 // ============================================================
 // PUBLIC
@@ -59,11 +59,11 @@ const getPublicAgentProfile = asyncHandler(async (req, res) => {
       code: agent.code,
       publicSlug: agent.publicSlug,
       joinDate: agent.createdAt,
-      referralLinks: {
+            referralLinks: {
         general: `${FRONTEND_URL}/?ref=${agent.code}`,
-        shop: `${FRONTEND_URL}/?ref=${agent.code}&intent=buyer`,
-        sell: `${FRONTEND_URL}/become-a-seller.html?ref=${agent.code}`, // ASSUMED path
-        joinAsAgent: `${FRONTEND_URL}/agent/apply.html?ref=${agent.code}`, // ASSUMED path
+        shop: `${FRONTEND_URL}/register.html?ref=${agent.code}&intent=buyer`,
+        sell: `${FRONTEND_URL}/register.html?ref=${agent.code}&intent=seller`,
+        joinAsAgent: `${FRONTEND_URL}/agent-apply.html?ref=${agent.code}`,
       },
     },
   });

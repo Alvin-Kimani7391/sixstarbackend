@@ -3,6 +3,12 @@ const { generateQrDataUrl } = require('../services/qrService');
 const { buildReferralLink, buildRecruitmentMessage, buildProductCaption } = require('../services/shareMessageService');
 const AgentLead = require('../models/AgentLead');
 const Product = require('../models/Product');
+const sendEmail = require('../utils/sendEmail');
+const { agentRecruitmentInviteTemplate } = require('../utils/emailTemplates');
+
+function logEmailFailure(err, label) {
+  console.error(`${label} email failed:`, err.body || err.message);
+}
 
 // @desc    Generate a QR code for any referral link type (spec §29-30)
 // @route   GET /api/sharing/qr?type=general&targetId=&channel=qr
@@ -24,8 +30,10 @@ const getShareMessage = asyncHandler(async (req, res) => {
   res.json({ success: true, link, message, channel });
 });
 
-// @desc    Recruit Buyer flow (spec §23) — generates content and optionally
-//          logs the contact as a lead in the agent's CRM.
+// @desc    Recruit Buyer flow (spec §23) — generates content and logs the
+//          contact as a lead. For WhatsApp the frontend opens wa.me directly
+//          using the returned message; for Email the frontend calls
+//          sendInvite below instead of this, so the email actually sends.
 // @route   POST /api/sharing/recruit-buyer
 // @access  Private (agent)
 const recruitBuyer = asyncHandler(async (req, res) => {
@@ -79,6 +87,58 @@ const recruitSeller = asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, link, message, lead });
 });
 
+// @desc    Actually SEND a branded recruitment invite email to the intended
+//          person (buyer or seller) — styled like a real marketing email
+//          via Brevo, not a mailto: link. Also logs the recipient as a lead.
+// @route   POST /api/sharing/send-invite
+// @access  Private (agent)
+const sendInvite = asyncHandler(async (req, res) => {
+  const { type, email, name } = req.body;
+  const recruitType = type === 'seller' ? 'seller' : 'buyer';
+
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    res.status(400);
+    throw new Error('A valid recipient email address is required');
+  }
+
+  const link = buildReferralLink({ agentCode: req.agent.code, type: recruitType });
+
+  try {
+    await sendEmail({
+      to: email,
+      subject:
+        recruitType === 'seller'
+          ? `You're invited to sell on Six Star Suppliers`
+          : `You're invited to shop on Six Star Suppliers`,
+      html: agentRecruitmentInviteTemplate({
+        agentName: req.agent.name,
+        recipientName: name || '',
+        type: recruitType,
+        link,
+      }),
+      sender: 'info',
+    });
+  } catch (err) {
+    logEmailFailure(err, 'Agent recruitment invite');
+    res.status(502);
+    throw new Error('Could not send the invitation email right now. Please try again shortly.');
+  }
+
+  if (name) {
+    AgentLead.create({
+      agent: req.agent._id,
+      name,
+      email,
+      leadType: recruitType,
+      source: 'email',
+      status: 'invited',
+      lastContactAt: new Date(),
+    }).catch(() => {});
+  }
+
+  res.json({ success: true, message: 'Invitation email sent', link });
+});
+
 // @desc    Promote a specific product (spec §39)
 // @route   POST /api/sharing/products/:productId/promote
 // @access  Private (agent)
@@ -96,4 +156,4 @@ const promoteProduct = asyncHandler(async (req, res) => {
   res.json({ success: true, link, caption, qrDataUrl, product: { id: product._id, name: product.name, image: product.images?.[0] || null } });
 });
 
-module.exports = { getQrCode, getShareMessage, recruitBuyer, recruitSeller, promoteProduct };
+module.exports = { getQrCode, getShareMessage, recruitBuyer, recruitSeller, sendInvite, promoteProduct };

@@ -1,31 +1,22 @@
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const asyncHandler = require('express-async-handler');
-const crypto = require('crypto');
 const Agent = require('../models/Agent');
-const AgentBadge = require('../models/AgentBadge');
 const sendEmail = require('../utils/sendEmail');
-const getAdminEmails = require('../utils/getAdminEmails');
 const {
   agentApplicationReceivedTemplate,
   agentApplicationAdminTemplate,
   agentPasswordResetTemplate,
 } = require('../utils/emailTemplates');
 
+// Same fallback pattern as controllers2/agentController.js and
+// services/shareMessageService.js — set FRONTEND_URL on Render to
+// https://www.sixstarsuppliers.com so all three stay in sync.
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.sixstarsuppliers.com';
+const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes — matches the buyer/seller reset flow
+
 function safeSendEmail(opts, label) {
   sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.body || err.message));
-}
-
-function signAgentToken(agentId) {
-  return jwt.sign({ id: agentId, scope: 'agent' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-}
-
-function setAgentCookie(res, token) {
-  res.cookie('agentToken', token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    maxAge: 30 * 24 * 60 * 60 * 1000,
-  });
 }
 
 function safeAgent(agent) {
@@ -36,92 +27,110 @@ function safeAgent(agent) {
   return obj;
 }
 
-// @desc    Public agent application (self-registration)
-// @route   POST /api/agents/apply
-// @access  Public
-// @desc    Public agent application (self-registration)
+function generateAgentToken(res, agentId) {
+  // Separate JWT payload shape ({ scope: 'agent' }) and separate cookie name
+  // ('agentToken') from buyer/seller/admin sessions — see
+  // middleware/agentAuthMiddleware.js's protectAgent, which checks both.
+  const token = jwt.sign({ id: agentId, scope: 'agent' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  res.cookie('agentToken', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+}
+
+async function getAdminEmails() {
+  if (process.env.ADMIN_EMAILS) {
+    return process.env.ADMIN_EMAILS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const { User } = require('../models/User');
+  const admins = await User.find({ role: 'admin' }).select('email');
+  return admins.map((a) => a.email).filter(Boolean);
+}
+
+// @desc    Public self-registration — application starts as 'pending'.
+//          Logs the applicant in immediately (agentAuthMiddleware allows
+//          any non-rejected/deactivated status) so the dashboard can show
+//          them an "under review" screen right away.
 // @route   POST /api/agents/apply
 // @access  Public
 const applyAsAgent = asyncHandler(async (req, res) => {
-  const {
-    name,
-    email,
-    phone,
-    password,
-    location,
-    preferredChannel,
-    socialMedia,
-    termsAccepted,
-    marketingPolicyAccepted,
-  } = req.body;
+  const { name, phone, email, password, location, bio, preferredChannel, termsAccepted, marketingPolicyAccepted } = req.body;
 
-  if (!name || !email || !phone || !password) {
+  if (!name || !phone || !email || !password) {
     res.status(400);
-    throw new Error('Name, email, phone and password are required');
+    throw new Error('Name, phone, email and password are required');
   }
-  if (password.length < 6) {
+  if (termsAccepted !== 'true' && termsAccepted !== true) {
     res.status(400);
-    throw new Error('Password must be at least 6 characters');
+    throw new Error('You must accept the Terms of Service to apply');
   }
-  if (!termsAccepted || !marketingPolicyAccepted) {
+  if (marketingPolicyAccepted !== 'true' && marketingPolicyAccepted !== true) {
     res.status(400);
-    throw new Error('You must accept the Terms and the Marketing Policy to apply');
+    throw new Error('You must accept the Agent Marketing Policy to apply');
   }
 
   const existing = await Agent.findOne({ email: email.toLowerCase().trim() });
   if (existing) {
     res.status(400);
-    throw new Error('An agent application already exists for this email');
+    throw new Error('An agent account with this email already exists');
   }
 
-  const defaultBadge = await AgentBadge.findOne({ isDefault: true, isActive: true });
+  let socialMedia = {};
+  if (req.body.socialMedia) {
+    try {
+      socialMedia = typeof req.body.socialMedia === 'string' ? JSON.parse(req.body.socialMedia) : req.body.socialMedia;
+    } catch {
+      /* ignore malformed */
+    }
+  }
 
   const agent = await Agent.create({
     name,
-    email: email.toLowerCase().trim(),
     phone,
+    email: email.toLowerCase().trim(),
     password,
     location: location || '',
-    bio: req.body.bio || '',
+    bio: bio || '',
     preferredChannel: preferredChannel || 'whatsapp',
-    socialMedia: socialMedia || {},
-    avatar: req.file ? req.file.path : '', // NEW — was silently dropped before
+    socialMedia,
+    avatar: req.file ? req.file.path : '',
+    agentType: 'standard',
+    status: 'pending',
     termsAcceptedAt: new Date(),
     marketingPolicyAcceptedAt: new Date(),
-    status: 'pending',
-    agentType: 'standard',
-    badge: defaultBadge ? defaultBadge._id : null,
-    commissionRate: defaultBadge ? defaultBadge.commissionRate : 5,
   });
 
-  const token = signAgentToken(agent._id);
-  setAgentCookie(res, token);
+  generateAgentToken(res, agent._id);
 
-  res.status(201).json({ success: true, agent: safeAgent(agent), token });
+  res.status(201).json({ success: true, agent: safeAgent(agent) });
 
   safeSendEmail(
     {
       to: agent.email,
-      subject: 'Your Agent Application Was Received',
+      subject: 'Application Received — Six Star Suppliers Agent Program',
       html: agentApplicationReceivedTemplate({ name: agent.name }),
       sender: 'info',
     },
     'Agent application received'
   );
 
-  getAdminEmails().then((adminEmails) => {
-    adminEmails.forEach((to) => {
-      safeSendEmail(
-        {
-          to,
-          subject: `New Agent Application - ${agent.name}`,
-          html: agentApplicationAdminTemplate({ agent }),
-          sender: 'info',
-        },
-        'Agent application (admin alert)'
+  getAdminEmails()
+    .then((emails) => {
+      emails.forEach((to) =>
+        safeSendEmail(
+          {
+            to,
+            subject: `New Agent Application — ${agent.name}`,
+            html: agentApplicationAdminTemplate({ agent }),
+            sender: 'info',
+          },
+          'Agent application (admin alert)'
+        )
       );
-    });
-  });
+    })
+    .catch(() => {});
 });
 
 // @desc    Agent login
@@ -131,26 +140,30 @@ const agentLogin = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     res.status(400);
-    throw new Error('Email and password are required');
+    throw new Error('Please provide email and password');
   }
 
   const agent = await Agent.findOne({ email: email.toLowerCase().trim() }).select('+password');
-  if (!agent || !(await agent.matchPassword(password))) {
+  if (!agent) {
     res.status(401);
     throw new Error('Invalid email or password');
   }
   if (['rejected', 'deactivated'].includes(agent.status)) {
     res.status(403);
-    throw new Error('This agent account is no longer active. Contact support for help.');
+    throw new Error('This agent account is no longer active. Contact support.');
+  }
+
+  const isMatch = await agent.matchPassword(password);
+  if (!isMatch) {
+    res.status(401);
+    throw new Error('Invalid email or password');
   }
 
   agent.lastLoginAt = new Date();
-  await agent.save();
+  await agent.save({ validateBeforeSave: false });
 
-  const token = signAgentToken(agent._id);
-  setAgentCookie(res, token);
-
-  res.json({ success: true, agent: safeAgent(agent), token });
+  generateAgentToken(res, agent._id);
+  res.json({ success: true, agent: safeAgent(agent) });
 });
 
 // @desc    Agent logout
@@ -158,18 +171,18 @@ const agentLogin = asyncHandler(async (req, res) => {
 // @access  Private (agent)
 const agentLogout = asyncHandler(async (req, res) => {
   res.cookie('agentToken', '', { httpOnly: true, expires: new Date(0) });
-  res.json({ success: true, message: 'Logged out' });
+  res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// @desc    Get my own agent profile (full, private view)
+// @desc    Get own agent profile
 // @route   GET /api/agents/me
 // @access  Private (agent)
 const getMyAgentProfile = asyncHandler(async (req, res) => {
-  const agent = await Agent.findById(req.agent._id).populate('badge');
+  const agent = await Agent.findById(req.agent._id).populate('badge', 'name color commissionRate');
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Update my own agent profile
+// @desc    Update own profile (name/phone/location/bio/channel/social/avatar)
 // @route   PATCH /api/agents/me
 // @access  Private (agent)
 const updateMyAgentProfile = asyncHandler(async (req, res) => {
@@ -179,99 +192,127 @@ const updateMyAgentProfile = asyncHandler(async (req, res) => {
     throw new Error('Agent not found');
   }
 
-  const editableFields = ['name', 'phone', 'bio', 'location', 'preferredChannel'];
-  editableFields.forEach((field) => {
-    if (req.body[field] !== undefined) agent[field] = req.body[field];
+  const editable = ['name', 'phone', 'location', 'bio', 'preferredChannel'];
+  editable.forEach((f) => {
+    if (req.body[f] !== undefined) agent[f] = req.body[f];
   });
-  if (req.body.socialMedia !== undefined) {
-    agent.socialMedia = { ...(agent.socialMedia?.toObject?.() || {}), ...req.body.socialMedia };
+
+  if (req.body.socialMedia) {
+    try {
+      const parsed = typeof req.body.socialMedia === 'string' ? JSON.parse(req.body.socialMedia) : req.body.socialMedia;
+      agent.socialMedia = { ...agent.socialMedia.toObject(), ...parsed };
+    } catch {
+      /* ignore malformed */
+    }
   }
-  if (req.file) {
-    agent.avatar = req.file.path;
-  }
+
+  if (req.file) agent.avatar = req.file.path;
 
   await agent.save();
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Change my agent password
+// @desc    Change own password while logged in
 // @route   PUT /api/agents/change-password
 // @access  Private (agent)
 const changeAgentPassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
-  const agent = await Agent.findById(req.agent._id).select('+password');
-  if (!agent || !(await agent.matchPassword(currentPassword))) {
-    res.status(401);
-    throw new Error('Current password is incorrect');
+  if (!currentPassword || !newPassword) {
+    res.status(400);
+    throw new Error('Current password and new password are required');
   }
-  if (!newPassword || newPassword.length < 6) {
+  if (newPassword.length < 6) {
     res.status(400);
     throw new Error('New password must be at least 6 characters');
   }
+
+  const agent = await Agent.findById(req.agent._id).select('+password');
+  const isMatch = await agent.matchPassword(currentPassword);
+  if (!isMatch) {
+    res.status(401);
+    throw new Error('Current password is incorrect');
+  }
+
   agent.password = newPassword;
   await agent.save();
+
   res.json({ success: true, message: 'Password updated' });
 });
 
-// @desc    Request a password reset link
+// @desc    Request a password reset email
 // @route   POST /api/agents/forgot-password
 // @access  Public
 const forgotAgentPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
-  const agent = await Agent.findOne({ email: (email || '').toLowerCase().trim() });
+  const genericResponse = {
+    success: true,
+    message: "If an agent account exists for that email, we've sent password reset instructions.",
+  };
 
-  // Always respond success so this endpoint can't be used to enumerate agent emails
-  if (!agent) {
-    return res.json({ success: true, message: 'If that email exists, a reset link has been sent' });
-  }
+  if (!email) return res.json(genericResponse);
+
+  const agent = await Agent.findOne({ email: email.toLowerCase().trim() });
+  if (!agent) return res.json(genericResponse);
 
   const rawToken = crypto.randomBytes(32).toString('hex');
   agent.resetPasswordToken = crypto.createHash('sha256').update(rawToken).digest('hex');
-  agent.resetPasswordExpire = Date.now() + 15 * 60 * 1000;
-  await agent.save();
+  agent.resetPasswordExpire = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+  await agent.save({ validateBeforeSave: false });
 
-  const resetUrl = `${process.env.FRONTEND_URL || 'https://sixstarsuppliers.com'}/agent/reset-password.html?token=${rawToken}`;
+  const resetUrl = `${FRONTEND_URL}/agent-reset-password.html?token=${rawToken}`;
 
-  safeSendEmail(
-    {
+  try {
+    await sendEmail({
       to: agent.email,
-      subject: 'Reset Your Agent Password',
+      subject: 'Reset your Six Star Suppliers agent password',
       html: agentPasswordResetTemplate({ name: agent.name, resetUrl }),
       sender: 'noreply',
-    },
-    'Agent password reset'
-  );
+    });
+  } catch (err) {
+    agent.resetPasswordToken = undefined;
+    agent.resetPasswordExpire = undefined;
+    await agent.save({ validateBeforeSave: false });
+    console.error('Agent reset email failed:', err.body || err.message);
+    res.status(500);
+    throw new Error('Could not send the reset email right now. Please try again shortly.');
+  }
 
-  res.json({ success: true, message: 'If that email exists, a reset link has been sent' });
+  res.json(genericResponse);
 });
 
-// @desc    Reset password using the emailed token
+// @desc    Reset password using the token emailed to the agent
 // @route   POST /api/agents/reset-password
 // @access  Public
 const resetAgentPassword = asyncHandler(async (req, res) => {
-  const { token, newPassword } = req.body;
-  if (!token || !newPassword || newPassword.length < 6) {
+  const { token, password } = req.body;
+  if (!token || !password) {
     res.status(400);
-    throw new Error('A valid token and a password of at least 6 characters are required');
+    throw new Error('Reset token and new password are required');
+  }
+  if (password.length < 6) {
+    res.status(400);
+    throw new Error('Password must be at least 6 characters');
   }
 
-  const hashed = crypto.createHash('sha256').update(token).digest('hex');
+  const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
   const agent = await Agent.findOne({
-    resetPasswordToken: hashed,
+    resetPasswordToken: hashedToken,
     resetPasswordExpire: { $gt: Date.now() },
-  });
+  }).select('+resetPasswordToken +resetPasswordExpire');
 
   if (!agent) {
     res.status(400);
-    throw new Error('This reset link is invalid or has expired');
+    throw new Error('This reset link is invalid or has expired. Please request a new one.');
   }
 
-  agent.password = newPassword;
+  agent.password = password;
   agent.resetPasswordToken = undefined;
   agent.resetPasswordExpire = undefined;
   await agent.save();
 
-  res.json({ success: true, message: 'Password reset — please log in' });
+  generateAgentToken(res, agent._id);
+  res.json({ success: true, message: 'Password updated successfully', agent: safeAgent(agent) });
 });
 
 module.exports = {
