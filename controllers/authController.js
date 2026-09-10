@@ -78,13 +78,23 @@ function sendWelcomeEmail(user) {
 }
 
 // ============================================================
-// NEW — Agent referral attribution at signup.
+// Agent referral attribution at signup.
 // ------------------------------------------------------------
 // Accepts either `referralCode` or the shorter `ref` (matching the
 // ?ref=CODE query param your referral links use — see
-// controllers2/agentController.js's getPublicAgentProfile). Looks up an
-// ACTIVE agent by code; if found, snapshots the attribution onto the new
+// controllers2/agentController.js's getPublicAgentProfile). Looks up a
+// working agent by code; if found, snapshots the attribution onto the new
 // user and bumps the agent's buyersReferred/sellersReferred counter.
+//
+// FIX: this used to filter on `isActive: true`, which only becomes true
+// once an agent's status is EXACTLY 'active' (see the pre-save hook in
+// models/Agent.js). The agent dashboard (agent.js -> showDashboard()) and
+// the referral-click tracker both treat 'approved' as a fully working
+// agent too — so an agent sitting in 'approved' status could send out a
+// perfectly good recruitment link, the buyer would register with ?ref=
+// attached and everything, and this lookup would STILL come back empty,
+// silently dropping the attribution (referredBy stayed null). Matching on
+// `status` the same way those other two places do fixes it.
 //
 // This never blocks registration — an invalid/expired/missing code just
 // means no attribution is recorded, exactly like the existing agentCode
@@ -94,7 +104,7 @@ async function resolveReferralAttribution(rawCode, role) {
   const code = (rawCode || '').trim().toUpperCase();
   if (!code) return null;
 
-  const agent = await Agent.findOne({ code, isActive: true });
+  const agent = await Agent.findOne({ code, status: { $in: ['approved', 'active'] } });
   if (!agent) return null;
 
   const referralType = role === 'buyer' ? 'buyer' : 'seller'; // wholesaler/retailer both count as seller referrals
@@ -150,8 +160,8 @@ const registerUser = asyncHandler(async (req, res) => {
     throw new Error('Shop name is required for retailers');
   }
 
-  // NEW — resolve referral attribution (if a code was carried through from
-  // a referral link / QR code) before creating the account, so it can be
+  // Resolve referral attribution (if a code was carried through from a
+  // referral link / QR code) before creating the account, so it can be
   // set at creation time rather than a second write.
   const attribution = await resolveReferralAttribution(referralCode || ref, role);
 
@@ -413,8 +423,15 @@ const resendLoginOtp = asyncHandler(async (req, res) => {
 // @desc    Sign in or register using a Google ID token
 // @route   POST /api/auth/google
 // @access  Public
+//
+// NEW: Google sign-up is buyer-only, but it now carries `ref` through the
+// same resolveReferralAttribution() path as the email/password flow, so a
+// buyer who clicks a recruitment link and then signs up with Google (instead
+// of the email form) still gets correctly attributed to the referring
+// agent. Only applied on brand-new signups — an existing account logging in
+// via Google is never retroactively re-attributed.
 const googleAuth = asyncHandler(async (req, res) => {
-  const { credential } = req.body;
+  const { credential, ref, referralCode } = req.body;
 
   if (!credential) {
     res.status(400);
@@ -442,6 +459,7 @@ const googleAuth = asyncHandler(async (req, res) => {
 
   let user = await User.findOne({ $or: [{ googleId }, { email }] }).select('+googleId');
   let isNewSignup = false;
+  let attribution = null;
 
   if (user) {
     if (!user.googleId) {
@@ -455,18 +473,25 @@ const googleAuth = asyncHandler(async (req, res) => {
       throw new Error('This account has been suspended. Contact support.');
     }
   } else {
-    // NOTE: Google sign-up is buyer-only in this flow, and doesn't currently
-    // carry a ?ref= code through — if you want agent attribution on Google
-    // sign-ups too, pass `req.body.ref` here the same way registerUser does
-    // and I'll wire it in.
+    attribution = await resolveReferralAttribution(referralCode || ref, 'buyer');
+
     user = await Buyer.create({
       name,
       email,
       googleId,
       avatar: picture,
       isVerified: true,
+      ...(attribution ? { referredBy: attribution.snapshot } : {}),
     });
     isNewSignup = true;
+
+    if (attribution) {
+      bumpAgentReferralStat(attribution.agentDoc, 'buyer').catch((err) =>
+        console.error('Agent referral stat update failed:', err.message)
+      );
+      checkSelfReferral(attribution.agentDoc, user).catch(() => {});
+      autoTrackConversion({ agentId: attribution.agentDoc._id, user, leadType: 'buyer' }).catch(() => {});
+    }
   }
 
   // Google sign-in bypasses the email-OTP gate intentionally — Google's own
