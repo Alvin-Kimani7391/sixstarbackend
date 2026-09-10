@@ -10,6 +10,7 @@ const { notFound, errorHandler } = require('./middleware/errorMiddleware');
 const { startRFQScheduler } = require('./utils/rfqScheduler');
 const { startPaymentReaper } = require('./utils/paymentReaper');
 const { startStockReminderScheduler } = require('./utils/stockReminderScheduler'); // NEW — add near the other requires
+const { startCampaignScheduler } = require('./utils/campaignScheduler'); // NEW — bulk/promo email scheduler
 
 dotenv.config();
 
@@ -96,6 +97,15 @@ app.use('/api/agent-analytics', require('./routes/analyticsRoutes'));
 app.use('/api/engagement', require('./routes/engagementRoutes'));
 app.use('/api/fraud', require('./routes/fraudRoutes'));
 
+// ============================================================
+// NEW — Bulk/Promotional Email Marketing + CRM, and public guest
+// search/view capture. Mounted as their own top-level routers,
+// exactly like every other feature area above, so nothing about
+// /api/marketing (the agent Marketing Center) changes at all.
+// ============================================================
+app.use('/api/marketing/email', require('./routes/emailMarketingRoutes'));
+app.use('/api/guest', require('./routes/guestTrackingRoutes'));
+
 
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 
@@ -125,6 +135,7 @@ mongoose
     });
     startRFQScheduler(); // NEW — expires overdue RFQs, sends deadline reminders
     startStockReminderScheduler(); // NEW — periodic low-stock reminder sweep
+    startCampaignScheduler(); // NEW — sends scheduled promotional email campaigns when due
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err.message);
