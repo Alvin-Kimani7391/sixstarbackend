@@ -35,7 +35,9 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.sixstarsuppliers.c
 // @route   GET /api/agents
 // @access  Public
 const getActiveAgents = asyncHandler(async (req, res) => {
-  const agents = await Agent.find({ isActive: true }).select('name code').sort('name');
+  const agents = await Agent.find({ status: { $in: ['approved', 'active'] } })
+    .select('name code')
+    .sort('name');
   res.json({ success: true, count: agents.length, agents });
 });
 
