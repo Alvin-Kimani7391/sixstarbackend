@@ -75,8 +75,20 @@ const getPublicAgentProfile = asyncHandler(async (req, res) => {
 //          gets stitched on in later phases via convertedUser.
 // @route   POST /api/agents/track/:code
 // @access  Public
+//
+// FIX: this used to filter on `isActive: true`, but isActive only flips to
+// true once an agent's status is EXACTLY 'active' (see the pre-save hook in
+// models/Agent.js). The dashboard (agent.js -> showDashboard()) treats both
+// 'approved' AND 'active' as a fully working agent, so any agent sitting in
+// 'approved' status had a fully functional dashboard and shareable links,
+// but every single click on those links silently no-op'd here (204, nothing
+// written) because isActive was still false for them. Matching on `status`
+// instead — the same two values the dashboard itself checks — fixes that.
 const trackReferralClick = asyncHandler(async (req, res) => {
-  const agent = await Agent.findOne({ code: req.params.code.toUpperCase(), isActive: true });
+  const agent = await Agent.findOne({
+    code: req.params.code.toUpperCase(),
+    status: { $in: ['approved', 'active'] },
+  });
   if (!agent) {
     // Don't error the page load over a bad/stale referral code — just no-op.
     return res.status(204).end();
