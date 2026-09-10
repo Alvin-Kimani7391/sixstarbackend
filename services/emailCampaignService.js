@@ -8,7 +8,27 @@ const { promotionalCampaignTemplate } = require('../utils/marketingEmailTemplate
 const { getRecommendedProducts } = require('./recommendationService');
 const { ensureSubscriberForRecipient } = require('./subscriberService');
 
-const API_BASE = process.env.API_PUBLIC_URL || process.env.BACKEND_URL || 'https://api.sixstarsuppliers.com/api';
+// ------------------------------------------------------------------
+// API_BASE normalization
+//
+// Every click/open/unsubscribe link in a sent email is built by
+// prefixing a path with API_BASE, and the routes for those links are
+// mounted at /api/marketing/email/... (see server.js). If the
+// API_PUBLIC_URL / BACKEND_URL env var on Render doesn't itself end
+// in "/api", every link in every email silently 404s with
+// "Route not found - /marketing/email/click/...".
+//
+// This normalizes whatever's in the env var so it's always correct,
+// without depending on Render's env config being exactly right.
+// ------------------------------------------------------------------
+function normalizeApiBase(rawUrl) {
+  const fallback = 'https://sixstarbackend.onrender.com/api';
+  let url = (rawUrl || fallback).trim().replace(/\/+$/, '');
+  if (!/\/api$/i.test(url)) url += '/api';
+  return url;
+}
+
+const API_BASE = normalizeApiBase(process.env.API_PUBLIC_URL || process.env.BACKEND_URL);
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.sixstarsuppliers.com';
 
 // ------------------------------------------------------------------

@@ -19,9 +19,31 @@ const {
   SUPPORT_EMAIL,
 } = require('./emailTemplates');
 
-// Renders a responsive 2-across product grid. Every card links straight to
-// the product's detail page — clicking the picture, name, or price all go
-// to the same place, exactly like a normal e-commerce promo email.
+// A single, shared responsive stylesheet for the parts of the email this
+// file controls (product grid + hero image). Rendered once per email,
+// right before the content, so it's not duplicated if the grid function
+// happens to be called more than once. Media queries here are widely
+// supported by modern mobile mail clients (Apple Mail, Gmail app,
+// Outlook mobile, Yahoo, most webmail) — older/legacy clients that
+// ignore <style> media queries still get a sane, non-broken 2-column
+// layout since every rule has a safe default value inline as well.
+function emkResponsiveStyleBlock() {
+  return `
+    <style>
+      @media only screen and (max-width:480px) {
+        .emk-grid-td { display:block !important; width:100% !important; max-width:100% !important; padding:6px 0 !important; }
+        .emk-grid-img { height:190px !important; }
+        .emk-grid-title { font-size:13.5px !important; }
+        .emk-hero-img { max-height:220px !important; }
+        .emk-body-text { font-size:14.5px !important; line-height:1.6 !important; }
+      }
+    </style>`;
+}
+
+// Renders a responsive 2-across (desktop) / 1-across (phone) product grid.
+// Every card links straight to the product's detail page — clicking the
+// picture, name, or price all go to the same place, exactly like a normal
+// e-commerce promo email.
 function productGridHtml(products, campaignClickUrl) {
   if (!products || !products.length) return '';
 
@@ -35,11 +57,11 @@ function productGridHtml(products, campaignClickUrl) {
          <span style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-left:6px;">${money(p.originalPrice)}</span>`
       : `<span style="font-weight:800;color:${COLORS.ink};">${money(p.price)}</span>`;
     return `
-      <td width="50%" valign="top" style="padding:8px;">
+      <td class="emk-grid-td" width="50%" valign="top" style="padding:8px;">
         <a href="${url}" target="_blank" style="text-decoration:none;display:block;border:1px solid ${COLORS.border};border-radius:12px;overflow:hidden;background:${COLORS.card};">
-          <img src="${img}" width="100%" alt="" style="display:block;width:100%;height:160px;object-fit:cover;background:${COLORS.chip};">
+          <img class="emk-grid-img" src="${img}" width="100%" alt="" style="display:block;width:100%;max-width:100%;height:150px;object-fit:cover;background:${COLORS.chip};">
           <div style="padding:12px 14px;">
-            <div style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;">${(p.name || 'Product').toString()}</div>
+            <div class="emk-grid-title" style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;word-break:break-word;">${(p.name || 'Product').toString()}</div>
             <div style="font-size:14px;">${priceHtml}</div>
           </div>
         </a>
@@ -48,11 +70,11 @@ function productGridHtml(products, campaignClickUrl) {
 
   let rowsHtml = '';
   for (let i = 0; i < cardHtmlArr.length; i += 2) {
-    rowsHtml += `<tr>${cardHtmlArr[i]}${cardHtmlArr[i + 1] || '<td width="50%"></td>'}</tr>`;
+    rowsHtml += `<tr>${cardHtmlArr[i]}${cardHtmlArr[i + 1] || '<td class="emk-grid-td" width="50%"></td>'}</tr>`;
   }
 
   return `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:6px 0 4px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:100%;margin:6px 0 4px;">
       ${rowsHtml}
     </table>`;
 }
@@ -95,7 +117,7 @@ function promotionalCampaignTemplate({
   }
 
   const heroHtml = campaign.heroImageUrl
-    ? `<img src="${campaign.heroImageUrl}" alt="" style="width:100%;border-radius:12px;display:block;margin-bottom:18px;">`
+    ? `<img class="emk-hero-img" src="${campaign.heroImageUrl}" alt="" style="width:100%;max-width:100%;height:auto;max-height:320px;object-fit:cover;border-radius:12px;display:block;margin-bottom:18px;">`
     : '';
 
   const ctaHtml = campaign.ctaUrl
@@ -110,8 +132,9 @@ function promotionalCampaignTemplate({
     : '';
 
   const bodyWithExtras = `
+    ${emkResponsiveStyleBlock()}
     ${heroHtml}
-    <div style="font-size:14px;line-height:1.7;color:${COLORS.ink};white-space:pre-wrap;">${bodyHtml}</div>
+    <div class="emk-body-text" style="font-size:14px;line-height:1.7;color:${COLORS.ink};white-space:pre-wrap;word-break:break-word;">${bodyHtml}</div>
     ${ctaHtml}
     ${unsubscribeFooterHtml(unsubscribeUrl)}
     ${pixelHtml}
