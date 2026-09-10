@@ -9,11 +9,8 @@ const {
   agentPasswordResetTemplate,
 } = require('../utils/emailTemplates');
 
-// Same fallback pattern as controllers2/agentController.js and
-// services/shareMessageService.js — set FRONTEND_URL on Render to
-// https://www.sixstarsuppliers.com so all three stay in sync.
 const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.sixstarsuppliers.com';
-const RESET_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes — matches the buyer/seller reset flow
+const RESET_TOKEN_TTL_MS = 15 * 60 * 1000;
 
 function safeSendEmail(opts, label) {
   sendEmail(opts).catch((err) => console.error(`${label} email failed:`, err.body || err.message));
@@ -28,9 +25,6 @@ function safeAgent(agent) {
 }
 
 function generateAgentToken(res, agentId) {
-  // Separate JWT payload shape ({ scope: 'agent' }) and separate cookie name
-  // ('agentToken') from buyer/seller/admin sessions — see
-  // middleware/agentAuthMiddleware.js's protectAgent, which checks both.
   const token = jwt.sign({ id: agentId, scope: 'agent' }, process.env.JWT_SECRET, { expiresIn: '30d' });
   res.cookie('agentToken', token, {
     httpOnly: true,
@@ -49,12 +43,6 @@ async function getAdminEmails() {
   return admins.map((a) => a.email).filter(Boolean);
 }
 
-// @desc    Public self-registration — application starts as 'pending'.
-//          Logs the applicant in immediately (agentAuthMiddleware allows
-//          any non-rejected/deactivated status) so the dashboard can show
-//          them an "under review" screen right away.
-// @route   POST /api/agents/apply
-// @access  Public
 const applyAsAgent = asyncHandler(async (req, res) => {
   const { name, phone, email, password, location, bio, preferredChannel, termsAccepted, marketingPolicyAccepted } = req.body;
 
@@ -133,9 +121,6 @@ const applyAsAgent = asyncHandler(async (req, res) => {
     .catch(() => {});
 });
 
-// @desc    Agent login
-// @route   POST /api/agents/login
-// @access  Public
 const agentLogin = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -166,23 +151,17 @@ const agentLogin = asyncHandler(async (req, res) => {
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Agent logout
-// @route   POST /api/agents/logout
-// @access  Private (agent)
 const agentLogout = asyncHandler(async (req, res) => {
   res.cookie('agentToken', '', { httpOnly: true, expires: new Date(0) });
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// @desc    Get own agent profile
-// @route   GET /api/agents/me
-// @access  Private (agent)
 const getMyAgentProfile = asyncHandler(async (req, res) => {
   const agent = await Agent.findById(req.agent._id).populate('badge', 'name color commissionRate');
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Update own profile (name/phone/location/bio/channel/social/avatar)
+// @desc    Update own profile (name/phone/location/bio/channel/social/avatar/payout)
 // @route   PATCH /api/agents/me
 // @access  Private (agent)
 const updateMyAgentProfile = asyncHandler(async (req, res) => {
@@ -206,15 +185,24 @@ const updateMyAgentProfile = asyncHandler(async (req, res) => {
     }
   }
 
+  // NEW — payout / payment details (mpesa or bank). Sent as a JSON string
+  // inside the same multipart FormData as the avatar, same pattern as
+  // socialMedia above.
+  if (req.body.payout) {
+    try {
+      const parsed = typeof req.body.payout === 'string' ? JSON.parse(req.body.payout) : req.body.payout;
+      agent.payout = { ...(agent.payout ? agent.payout.toObject() : {}), ...parsed };
+    } catch {
+      /* ignore malformed */
+    }
+  }
+
   if (req.file) agent.avatar = req.file.path;
 
   await agent.save();
   res.json({ success: true, agent: safeAgent(agent) });
 });
 
-// @desc    Change own password while logged in
-// @route   PUT /api/agents/change-password
-// @access  Private (agent)
 const changeAgentPassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) {
@@ -239,9 +227,6 @@ const changeAgentPassword = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Password updated' });
 });
 
-// @desc    Request a password reset email
-// @route   POST /api/agents/forgot-password
-// @access  Public
 const forgotAgentPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
   const genericResponse = {
@@ -280,9 +265,6 @@ const forgotAgentPassword = asyncHandler(async (req, res) => {
   res.json(genericResponse);
 });
 
-// @desc    Reset password using the token emailed to the agent
-// @route   POST /api/agents/reset-password
-// @access  Public
 const resetAgentPassword = asyncHandler(async (req, res) => {
   const { token, password } = req.body;
   if (!token || !password) {
