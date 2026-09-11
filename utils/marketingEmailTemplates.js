@@ -23,52 +23,61 @@ const {
 // Styles
 // ---------------------------------------------------------------------------
 //
-// The product rail is a horizontally-scrolling strip (same idea as the
-// "Hot Deals" rail on the live site) instead of a 2-column table grid.
-// A fixed-width card looks right at any viewport — mobile just shows less
-// of the next card peeking in, desktop shows more cards at once — so we
-// don't need to fight with percentage widths (that's what was causing the
-// stretching/oversized-image problem before).
+// FIX (this revision): the product rail's cards used to be
+// `display:inline-block` anchors inside a `white-space:nowrap` div. That
+// combination is known to misbehave in some mail-client rendering engines
+// (notably certain Gmail app builds): instead of respecting the parent's
+// `overflow-x:auto` and scrolling, the engine measures the nowrap row's
+// full intrinsic width (4+ cards = 600px+), decides the WHOLE EMAIL is too
+// wide for the screen, and zooms the entire message out uniformly to fit —
+// header, logo, and all text included. That is what caused both "the
+// whole email is tiny" AND "the logo looks small" — they were the same bug.
 //
-// Horizontal scroll + hidden scrollbar works in: Apple Mail (iOS/macOS),
-// the Gmail app (iOS/Android), Gmail webmail, Yahoo Mail, Outlook.com,
-// Outlook mobile (iOS/Android — NOT the same engine as Outlook desktop),
-// and most other modern clients.
+// The rail below uses a real <table><tr><td> row instead. Tables lay out
+// natively in a row and don't trigger that same width-leak/zoom-out
+// behavior, while a `<div style="overflow-x:auto">` wrapped around the
+// table still gives the correct native horizontal-scroll/swipe feel on
+// phones (Apple Mail, Gmail app current versions, Gmail webmail, Yahoo,
+// Outlook.com, Outlook mobile).
 //
-// Windows desktop Outlook (2016/2019/365 "classic") renders email with
-// Word's engine, not a browser engine — it does not support overflow
-// scrolling, flexbox, or reliable position:absolute. There's no CSS trick
-// that makes a scroll rail work there. So that one client gets its own
-// static fallback via `<!--[if mso]>` conditional comments, using the old
-// safe fixed-pixel-width table approach (fixed px, not %, so it can't
-// stretch). Every other client renders the real scrolling rail.
+// Windows desktop Outlook ("classic" 2016/2019/365, which renders with
+// Word's engine, not a browser engine) still can't do scrolling at all —
+// no CSS trick fixes that in any technique — so it keeps its own static
+// fallback via `<!--[if mso]>`, using a safe fixed-pixel 2-column table.
 function emkResponsiveStyleBlock() {
   return `
     <style>
       .emk-scroll {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
         -ms-overflow-style: none;
       }
       .emk-scroll::-webkit-scrollbar { display: none; height: 0; width: 0; }
+      .emk-scroll table { table-layout: auto; }
       .emk-card { scroll-snap-align: start; }
       @media only screen and (max-width: 480px) {
-        .emk-card { width: 130px !important; max-width: 130px !important; }
-        .emk-card-img { height: 114px !important; }
+        .emk-card { width: 128px !important; max-width: 128px !important; }
+        .emk-card-img { height: 112px !important; }
         .emk-card-title { font-size: 12px !important; }
         .emk-hero-img { max-height: 220px !important; }
         .emk-body-text { font-size: 14.5px !important; line-height: 1.6 !important; }
         .emk-section-title { font-size: 14px !important; }
       }
       @media only screen and (min-width: 481px) {
-        .emk-card { width: 164px !important; max-width: 164px !important; }
-        .emk-card-img { height: 142px !important; }
+        .emk-card { width: 160px !important; max-width: 160px !important; }
+        .emk-card-img { height: 138px !important; }
       }
     </style>`;
 }
 
 // ---------------------------------------------------------------------------
-// Single product card (used inside the scroll rail)
+// Single product card — now a <td> (row cell) instead of an inline-block
+// anchor, so it sits inside a real table row in the scroll rail.
 // ---------------------------------------------------------------------------
 function productCardHtml(p, campaignClickUrl) {
   const url = campaignClickUrl
@@ -98,58 +107,64 @@ function productCardHtml(p, campaignClickUrl) {
     : '';
 
   return `
-    <a href="${url}" target="_blank" class="emk-card"
-       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;white-space:normal;
-              margin:0 10px 0 0;text-decoration:none;background:${COLORS.card};
-              border:1px solid ${COLORS.border};border-radius:14px;overflow:hidden;
-              box-shadow:0 1px 3px rgba(16,29,49,0.07);">
-      <div style="position:relative;width:100%;background:${COLORS.chip};line-height:0;">
-        <img class="emk-card-img" src="${img}" width="150" alt=""
-             style="display:block;width:100%;height:128px;object-fit:cover;background:${COLORS.chip};">
-        ${discountBadge}
-        ${hotBadge}
-      </div>
-      <div style="padding:10px 11px 12px;">
-        <div class="emk-card-title" style="font-size:12.5px;font-weight:600;color:${COLORS.ink};
-             line-height:1.35;height:33px;overflow:hidden;margin-bottom:6px;word-break:break-word;">
-          ${name}
+    <td class="emk-card" width="150" valign="top"
+        style="width:150px;max-width:150px;padding:0 10px 0 0;">
+      <a href="${url}" target="_blank"
+         style="display:block;text-decoration:none;background:${COLORS.card};
+                border:1px solid ${COLORS.border};border-radius:14px;overflow:hidden;
+                box-shadow:0 1px 3px rgba(16,29,49,0.07);">
+        <div style="position:relative;width:100%;background:${COLORS.chip};line-height:0;">
+          <img class="emk-card-img" src="${img}" width="150" alt=""
+               style="display:block;width:100%;height:128px;object-fit:cover;background:${COLORS.chip};">
+          ${discountBadge}
+          ${hotBadge}
         </div>
-        <div style="font-size:10.5px;color:${COLORS.muted};margin-bottom:8px;">🏬 ${sellerLabel}</div>
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-          <tr>
-            <td valign="middle" style="text-align:left;">${priceHtml}</td>
-            <td valign="middle" width="26" style="text-align:right;">
-              <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;
-                    border-radius:50%;background:${COLORS.chip};color:${COLORS.ink};font-size:12px;font-weight:700;">→</span>
-            </td>
-          </tr>
-        </table>
-      </div>
-    </a>`;
+        <div style="padding:10px 11px 12px;">
+          <div class="emk-card-title" style="font-size:12.5px;font-weight:600;color:${COLORS.ink};
+               line-height:1.35;height:33px;overflow:hidden;margin-bottom:6px;word-break:break-word;">
+            ${name}
+          </div>
+          <div style="font-size:10.5px;color:${COLORS.muted};margin-bottom:8px;">🏬 ${sellerLabel}</div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td valign="middle" style="text-align:left;">${priceHtml}</td>
+              <td valign="middle" width="26" style="text-align:right;">
+                <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;
+                      border-radius:50%;background:${COLORS.chip};color:${COLORS.ink};font-size:12px;font-weight:700;">→</span>
+              </td>
+            </tr>
+          </table>
+        </div>
+      </a>
+    </td>`;
 }
 
-// A trailing "See all" card at the end of the rail, matching card sizing.
+// A trailing "See all" card at the end of the rail — also a <td> now, to
+// match the row-based layout of the cards.
 function viewAllCardHtml(viewAllUrl) {
   if (!viewAllUrl) return '';
   return `
-    <a href="${viewAllUrl}" target="_blank" class="emk-card"
-       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;height:206px;
-              white-space:normal;margin:0 10px 0 0;text-decoration:none;
-              border:1.5px dashed ${COLORS.border};border-radius:14px;
-              background:${COLORS.bg};text-align:center;">
-      <table role="presentation" width="100%" height="206" cellpadding="0" cellspacing="0">
-        <tr>
-          <td align="center" valign="middle" style="padding:0 14px;">
-            <span style="font-size:20px;display:block;margin-bottom:8px;">→</span>
-            <span style="font-size:12.5px;font-weight:700;color:${COLORS.accent};">See all deals</span>
-          </td>
-        </tr>
-      </table>
-    </a>`;
+    <td class="emk-card" width="150" valign="top" style="width:150px;max-width:150px;padding:0 10px 0 0;">
+      <a href="${viewAllUrl}" target="_blank"
+         style="display:block;height:206px;text-decoration:none;
+                border:1.5px dashed ${COLORS.border};border-radius:14px;
+                background:${COLORS.bg};text-align:center;">
+        <table role="presentation" width="100%" height="206" cellpadding="0" cellspacing="0">
+          <tr>
+            <td align="center" valign="middle" style="padding:0 14px;">
+              <span style="font-size:20px;display:block;margin-bottom:8px;">→</span>
+              <span style="font-size:12.5px;font-weight:700;color:${COLORS.accent};">See all deals</span>
+            </td>
+          </tr>
+        </table>
+      </a>
+    </td>`;
 }
 
 // Static fixed-pixel-width fallback table for Windows desktop Outlook only
 // (rendered inside `<!--[if mso]>`). Fixed px widths so it can never stretch.
+// Unchanged from before — Outlook desktop was never affected by the
+// scroll-rail bug since it never rendered the scroll rail in the first place.
 function outlookFallbackGridHtml(products, campaignClickUrl) {
   if (!products || !products.length) return '';
   const capped = products.slice(0, 4);
@@ -185,6 +200,12 @@ function outlookFallbackGridHtml(products, campaignClickUrl) {
 
 // ---------------------------------------------------------------------------
 // Public: horizontally-scrolling product rail (+ Outlook desktop fallback)
+//
+// FIX: the rail is now a <div style="overflow-x:auto"> wrapping a real
+// <table><tr>{cards as <td>}</tr></table>, instead of inline-block anchors
+// in a nowrap div. This is the standard, well-supported pattern for
+// horizontal-scroll rails in HTML email and avoids the whole-message
+// zoom-out issue some clients had with the previous approach.
 // ---------------------------------------------------------------------------
 function productGridHtml(products, campaignClickUrl, viewAllUrl) {
   if (!products || !products.length) return '';
@@ -197,9 +218,10 @@ function productGridHtml(products, campaignClickUrl, viewAllUrl) {
     ${outlookFallbackGridHtml(products, campaignClickUrl)}
     <![endif]-->
     <!--[if !mso]><!-->
-    <div class="emk-scroll" style="overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
-         white-space:nowrap;scroll-snap-type:x proximity;padding:4px 2px 14px;margin:0 -2px 4px;">
-      ${cardsHtml}${trailingCard}
+    <div class="emk-scroll" style="padding:4px 2px 14px;margin:0 0 4px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+        <tr>${cardsHtml}${trailingCard}</tr>
+      </table>
     </div>
     <!--<![endif]-->`;
 }
