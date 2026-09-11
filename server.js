@@ -111,7 +111,8 @@ app.use('/api/guest', require('./routes/guestTrackingRoutes'));
 
 
 app.use('/api/sharing', require('./routes/sharingRoutes'));
-app.use('/api/whatsapp-promo', require('./routes/agentWhatsappRoutes')); // NEW — agent WhatsApp product promo generator
+app.use('/api/sharing', require('./routes/agentWhatsappRoutes')); // NEW — agent WhatsApp product promo generator
+
 
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 
