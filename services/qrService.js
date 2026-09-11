@@ -6,4 +6,6 @@ async function generateQrDataUrl(text) {
   return QRCode.toDataURL(text, { margin: 1, width: 500, color: { dark: '#101d31', light: '#ffffff' } });
 }
 
+
+
 module.exports = { generateQrDataUrl };
