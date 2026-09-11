@@ -19,49 +19,156 @@ const {
   SUPPORT_EMAIL,
 } = require('./emailTemplates');
 
-// A single, shared responsive stylesheet for the parts of the email this
-// file controls (product grid + hero image). Rendered once per email,
-// right before the content, so it's not duplicated if the grid function
-// happens to be called more than once. Media queries here are widely
-// supported by modern mobile mail clients (Apple Mail, Gmail app,
-// Outlook mobile, Yahoo, most webmail) — older/legacy clients that
-// ignore <style> media queries still get a sane, non-broken 2-column
-// layout since every rule has a safe default value inline as well.
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+//
+// The product rail is a horizontally-scrolling strip (same idea as the
+// "Hot Deals" rail on the live site) instead of a 2-column table grid.
+// A fixed-width card looks right at any viewport — mobile just shows less
+// of the next card peeking in, desktop shows more cards at once — so we
+// don't need to fight with percentage widths (that's what was causing the
+// stretching/oversized-image problem before).
+//
+// Horizontal scroll + hidden scrollbar works in: Apple Mail (iOS/macOS),
+// the Gmail app (iOS/Android), Gmail webmail, Yahoo Mail, Outlook.com,
+// Outlook mobile (iOS/Android — NOT the same engine as Outlook desktop),
+// and most other modern clients.
+//
+// Windows desktop Outlook (2016/2019/365 "classic") renders email with
+// Word's engine, not a browser engine — it does not support overflow
+// scrolling, flexbox, or reliable position:absolute. There's no CSS trick
+// that makes a scroll rail work there. So that one client gets its own
+// static fallback via `<!--[if mso]>` conditional comments, using the old
+// safe fixed-pixel-width table approach (fixed px, not %, so it can't
+// stretch). Every other client renders the real scrolling rail.
 function emkResponsiveStyleBlock() {
   return `
     <style>
-      @media only screen and (max-width:480px) {
-        .emk-grid-td { display:block !important; width:100% !important; max-width:100% !important; padding:6px 0 !important; }
-        .emk-grid-img { height:190px !important; }
-        .emk-grid-title { font-size:13.5px !important; }
-        .emk-hero-img { max-height:220px !important; }
-        .emk-body-text { font-size:14.5px !important; line-height:1.6 !important; }
+      .emk-scroll {
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
+      }
+      .emk-scroll::-webkit-scrollbar { display: none; height: 0; width: 0; }
+      .emk-card { scroll-snap-align: start; }
+      @media only screen and (max-width: 480px) {
+        .emk-card { width: 130px !important; max-width: 130px !important; }
+        .emk-card-img { height: 114px !important; }
+        .emk-card-title { font-size: 12px !important; }
+        .emk-hero-img { max-height: 220px !important; }
+        .emk-body-text { font-size: 14.5px !important; line-height: 1.6 !important; }
+        .emk-section-title { font-size: 14px !important; }
+      }
+      @media only screen and (min-width: 481px) {
+        .emk-card { width: 164px !important; max-width: 164px !important; }
+        .emk-card-img { height: 142px !important; }
       }
     </style>`;
 }
 
-// Renders a responsive 2-across (desktop) / 1-across (phone) product grid.
-// Every card links straight to the product's detail page — clicking the
-// picture, name, or price all go to the same place, exactly like a normal
-// e-commerce promo email.
-function productGridHtml(products, campaignClickUrl) {
-  if (!products || !products.length) return '';
+// ---------------------------------------------------------------------------
+// Single product card (used inside the scroll rail)
+// ---------------------------------------------------------------------------
+function productCardHtml(p, campaignClickUrl) {
+  const url = campaignClickUrl
+    ? `${campaignClickUrl}?redirect=${encodeURIComponent(`${FRONTEND_URL}/product-detail.html?id=${p.id}`)}`
+    : `${FRONTEND_URL}/product-detail.html?id=${p.id}`;
 
-  const cardHtmlArr = products.map((p) => {
+  const img = p.image || NO_IMAGE_FALLBACK;
+  const name = (p.name || 'Product').toString();
+  const sellerLabel = p.sellerType || 'Retail seller';
+
+  const hasDiscount = p.originalPrice && Number(p.originalPrice) > Number(p.price);
+  const discountPct = hasDiscount
+    ? (p.discountPercent || Math.round((1 - Number(p.price) / Number(p.originalPrice)) * 100))
+    : null;
+
+  const priceHtml = hasDiscount
+    ? `<span style="font-weight:800;color:${COLORS.accent};font-size:13.5px;">${money(p.price)}</span>
+       <div style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-top:1px;">${money(p.originalPrice)}</div>`
+    : `<span style="font-weight:800;color:${COLORS.ink};font-size:13.5px;">${money(p.price)}</span>`;
+
+  const discountBadge = hasDiscount
+    ? `<span style="position:absolute;top:8px;left:8px;background:${COLORS.accent};color:#ffffff;font-size:10px;font-weight:800;letter-spacing:.2px;padding:3px 7px;border-radius:20px;line-height:1;">-${discountPct}%</span>`
+    : '';
+
+  const hotBadge = p.isHot
+    ? `<span style="position:absolute;top:8px;right:8px;background:#14151a;color:#ffffff;font-size:10px;font-weight:800;padding:3px 8px;border-radius:20px;line-height:1;white-space:nowrap;">🔥 Hot</span>`
+    : '';
+
+  return `
+    <a href="${url}" target="_blank" class="emk-card"
+       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;white-space:normal;
+              margin:0 10px 0 0;text-decoration:none;background:${COLORS.card};
+              border:1px solid ${COLORS.border};border-radius:14px;overflow:hidden;
+              box-shadow:0 1px 3px rgba(16,29,49,0.07);">
+      <div style="position:relative;width:100%;background:${COLORS.chip};line-height:0;">
+        <img class="emk-card-img" src="${img}" width="150" alt=""
+             style="display:block;width:100%;height:128px;object-fit:cover;background:${COLORS.chip};">
+        ${discountBadge}
+        ${hotBadge}
+      </div>
+      <div style="padding:10px 11px 12px;">
+        <div class="emk-card-title" style="font-size:12.5px;font-weight:600;color:${COLORS.ink};
+             line-height:1.35;height:33px;overflow:hidden;margin-bottom:6px;word-break:break-word;">
+          ${name}
+        </div>
+        <div style="font-size:10.5px;color:${COLORS.muted};margin-bottom:8px;">🏬 ${sellerLabel}</div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td valign="middle" style="text-align:left;">${priceHtml}</td>
+            <td valign="middle" width="26" style="text-align:right;">
+              <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;
+                    border-radius:50%;background:${COLORS.chip};color:${COLORS.ink};font-size:12px;font-weight:700;">→</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </a>`;
+}
+
+// A trailing "See all" card at the end of the rail, matching card sizing.
+function viewAllCardHtml(viewAllUrl) {
+  if (!viewAllUrl) return '';
+  return `
+    <a href="${viewAllUrl}" target="_blank" class="emk-card"
+       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;height:206px;
+              white-space:normal;margin:0 10px 0 0;text-decoration:none;
+              border:1.5px dashed ${COLORS.border};border-radius:14px;
+              background:${COLORS.bg};text-align:center;">
+      <table role="presentation" width="100%" height="206" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center" valign="middle" style="padding:0 14px;">
+            <span style="font-size:20px;display:block;margin-bottom:8px;">→</span>
+            <span style="font-size:12.5px;font-weight:700;color:${COLORS.accent};">See all deals</span>
+          </td>
+        </tr>
+      </table>
+    </a>`;
+}
+
+// Static fixed-pixel-width fallback table for Windows desktop Outlook only
+// (rendered inside `<!--[if mso]>`). Fixed px widths so it can never stretch.
+function outlookFallbackGridHtml(products, campaignClickUrl) {
+  if (!products || !products.length) return '';
+  const capped = products.slice(0, 4);
+
+  const cellHtmlArr = capped.map((p) => {
     const url = campaignClickUrl
       ? `${campaignClickUrl}?redirect=${encodeURIComponent(`${FRONTEND_URL}/product-detail.html?id=${p.id}`)}`
       : `${FRONTEND_URL}/product-detail.html?id=${p.id}`;
     const img = p.image || NO_IMAGE_FALLBACK;
-    const priceHtml = p.originalPrice
+    const priceHtml = p.originalPrice && Number(p.originalPrice) > Number(p.price)
       ? `<span style="font-weight:800;color:${COLORS.accent};">${money(p.price)}</span>
          <span style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-left:6px;">${money(p.originalPrice)}</span>`
       : `<span style="font-weight:800;color:${COLORS.ink};">${money(p.price)}</span>`;
     return `
-      <td class="emk-grid-td" width="50%" valign="top" style="padding:8px;">
+      <td width="260" valign="top" style="padding:8px;">
         <a href="${url}" target="_blank" style="text-decoration:none;display:block;border:1px solid ${COLORS.border};border-radius:12px;overflow:hidden;background:${COLORS.card};">
-          <img class="emk-grid-img" src="${img}" width="100%" alt="" style="display:block;width:100%;max-width:100%;height:150px;object-fit:cover;background:${COLORS.chip};">
+          <img src="${img}" width="260" height="150" alt="" style="display:block;width:260px;height:150px;object-fit:cover;background:${COLORS.chip};">
           <div style="padding:12px 14px;">
-            <div class="emk-grid-title" style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;word-break:break-word;">${(p.name || 'Product').toString()}</div>
+            <div style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;">${(p.name || 'Product').toString()}</div>
             <div style="font-size:14px;">${priceHtml}</div>
           </div>
         </a>
@@ -69,14 +176,32 @@ function productGridHtml(products, campaignClickUrl) {
   });
 
   let rowsHtml = '';
-  for (let i = 0; i < cardHtmlArr.length; i += 2) {
-    rowsHtml += `<tr>${cardHtmlArr[i]}${cardHtmlArr[i + 1] || '<td class="emk-grid-td" width="50%"></td>'}</tr>`;
+  for (let i = 0; i < cellHtmlArr.length; i += 2) {
+    rowsHtml += `<tr>${cellHtmlArr[i]}${cellHtmlArr[i + 1] || '<td width="260"></td>'}</tr>`;
   }
 
+  return `<table role="presentation" width="536" cellpadding="0" cellspacing="0" align="center">${rowsHtml}</table>`;
+}
+
+// ---------------------------------------------------------------------------
+// Public: horizontally-scrolling product rail (+ Outlook desktop fallback)
+// ---------------------------------------------------------------------------
+function productGridHtml(products, campaignClickUrl, viewAllUrl) {
+  if (!products || !products.length) return '';
+
+  const cardsHtml = products.map((p) => productCardHtml(p, campaignClickUrl)).join('');
+  const trailingCard = viewAllCardHtml(viewAllUrl);
+
   return `
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;max-width:100%;margin:6px 0 4px;">
-      ${rowsHtml}
-    </table>`;
+    <!--[if mso]>
+    ${outlookFallbackGridHtml(products, campaignClickUrl)}
+    <![endif]-->
+    <!--[if !mso]><!-->
+    <div class="emk-scroll" style="overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
+         white-space:nowrap;scroll-snap-type:x proximity;padding:4px 2px 14px;margin:0 -2px 4px;">
+      ${cardsHtml}${trailingCard}
+    </div>
+    <!--<![endif]-->`;
 }
 
 function unsubscribeFooterHtml(unsubscribeUrl) {
@@ -88,7 +213,9 @@ function unsubscribeFooterHtml(unsubscribeUrl) {
     </p>`;
 }
 
-// Main promotional / recommendation campaign email.
+// ---------------------------------------------------------------------------
+// Main promotional / recommendation campaign email
+// ---------------------------------------------------------------------------
 function promotionalCampaignTemplate({
   campaign,
   subscriber,
@@ -104,14 +231,19 @@ function promotionalCampaignTemplate({
   bodyHtml = bodyHtml.replace(/\{\{\s*name\s*\}\}/gi, name);
 
   const hasRecommendedPlaceholder = /\{\{\s*recommended_products\s*\}\}/i.test(bodyHtml);
-  const gridHtml = recommendedProducts.length ? productGridHtml(recommendedProducts, clickTrackingBaseUrl) : '';
+  const gridHtml = recommendedProducts.length
+    ? productGridHtml(recommendedProducts, clickTrackingBaseUrl, campaign.viewAllUrl)
+    : '';
 
   if (hasRecommendedPlaceholder) {
     bodyHtml = bodyHtml.replace(/\{\{\s*recommended_products\s*\}\}/gi, gridHtml);
   } else if (campaign.contentType === 'auto_recommendation' && gridHtml) {
+    const sectionLabel = subscriber?.searchHistory?.length || subscriber?.viewedProducts?.length
+      ? 'Recommended for you'
+      : 'You might also like';
     bodyHtml += `
-      <h3 style="margin:24px 0 4px;font-size:15px;color:${COLORS.ink};">
-        ${subscriber?.searchHistory?.length || subscriber?.viewedProducts?.length ? 'Recommended for you' : 'You might also like'}
+      <h3 class="emk-section-title" style="margin:24px 0 10px;font-size:15px;color:${COLORS.ink};">
+        🔥 ${sectionLabel}
       </h3>
       ${gridHtml}`;
   }
