@@ -1,263 +1,304 @@
-const EmailCampaign = require('../models/EmailCampaign');
-const EmailSubscriber = require('../models/EmailSubscriber');
-const EmailSendLog = require('../models/EmailSendLog');
-const Product = require('../models/Product');
-const { User } = require('../models/User');
-const sendEmail = require('../utils/sendEmail');
-const { promotionalCampaignTemplate } = require('../utils/marketingEmailTemplates');
-const { getRecommendedProducts } = require('./recommendationService');
-const { ensureSubscriberForRecipient } = require('./subscriberService');
-
-// ------------------------------------------------------------------
-// API_BASE normalization
+// utils/marketingEmailTemplates.js
 //
-// Every click/open/unsubscribe link in a sent email is built by
-// prefixing a path with API_BASE, and the routes for those links are
-// mounted at /api/marketing/email/... (see server.js). If the
-// API_PUBLIC_URL / BACKEND_URL env var on Render doesn't itself end
-// in "/api", every link in every email silently 404s with
-// "Route not found - /marketing/email/click/...".
+// Promotional-campaign email rendering, built ENTIRELY on top of the
+// existing utils/emailTemplates.js helpers (baseLayout/button/COLORS/etc).
+// This file is additive — it does not modify emailTemplates.js at all,
+// so nothing already using that file can break.
 //
-// This normalizes whatever's in the env var so it's always correct,
-// without depending on Render's env config being exactly right.
-// ------------------------------------------------------------------
-function normalizeApiBase(rawUrl) {
-  const fallback = 'https://sixstarbackend.onrender.com/api';
-  let url = (rawUrl || fallback).trim().replace(/\/+$/, '');
-  if (!/\/api$/i.test(url)) url += '/api';
-  return url;
-}
+// Usage:
+//   const { promotionalCampaignTemplate } = require('./marketingEmailTemplates');
+//   const html = promotionalCampaignTemplate({ campaign, subscriber, recommendedProducts, unsubscribeUrl, trackingPixelUrl });
 
-const API_BASE = normalizeApiBase(process.env.API_PUBLIC_URL || process.env.BACKEND_URL);
-const FRONTEND_URL = process.env.FRONTEND_URL || 'https://www.sixstarsuppliers.com';
+const {
+  baseLayout,
+  button,
+  COLORS,
+  money,
+  NO_IMAGE_FALLBACK,
+  FRONTEND_URL,
+  SUPPORT_EMAIL,
+} = require('./emailTemplates');
 
-// ------------------------------------------------------------------
-// SEGMENT RESOLUTION
-// Returns an array of { email, name, userId, role } — deduplicated by
-// email. Every recipient is then given/kept exactly one EmailSubscriber
-// record (see ensureSubscriberForRecipient) so unsubscribe + tracking
-// work uniformly whether they came from a signed-up account or not.
-// ------------------------------------------------------------------
-async function resolveSegmentRecipients(segment) {
-  const out = new Map();
-  const add = (email, name, userId, role) => {
-    email = (email || '').trim().toLowerCase();
-    if (!email || out.has(email)) return;
-    out.set(email, { email, name: name || '', userId: userId || null, role: role || 'guest' });
-  };
-
-  switch (segment.type) {
-    case 'buyers': {
-      const users = await User.find({ role: 'buyer', isActive: true }).select('email name');
-      users.forEach((u) => add(u.email, u.name, u._id, 'buyer'));
-      break;
-    }
-    case 'sellers': {
-      const users = await User.find({ role: { $in: ['wholesaler', 'retailer'] }, isActive: true }).select('email name role');
-      users.forEach((u) => add(u.email, u.name, u._id, u.role));
-      break;
-    }
-    case 'guests': {
-      const subs = await EmailSubscriber.find({ status: 'subscribed', userId: null }).select('email name');
-      subs.forEach((s) => add(s.email, s.name));
-      break;
-    }
-    case 'searched_term': {
-      const term = String(segment.value || '').trim().toLowerCase();
-      if (term) {
-        const subs = await EmailSubscriber.find({ status: 'subscribed', 'searchHistory.term': term }).select('email name userId role');
-        subs.forEach((s) => add(s.email, s.name, s.userId, s.role));
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
+//
+// The product rail is a horizontally-scrolling strip (same idea as the
+// "Hot Deals" rail on the live site) instead of a 2-column table grid.
+// A fixed-width card looks right at any viewport — mobile just shows less
+// of the next card peeking in, desktop shows more cards at once — so we
+// don't need to fight with percentage widths (that's what was causing the
+// stretching/oversized-image problem before).
+//
+// Horizontal scroll + hidden scrollbar works in: Apple Mail (iOS/macOS),
+// the Gmail app (iOS/Android), Gmail webmail, Yahoo Mail, Outlook.com,
+// Outlook mobile (iOS/Android — NOT the same engine as Outlook desktop),
+// and most other modern clients.
+//
+// Windows desktop Outlook (2016/2019/365 "classic") renders email with
+// Word's engine, not a browser engine — it does not support overflow
+// scrolling, flexbox, or reliable position:absolute. There's no CSS trick
+// that makes a scroll rail work there. So that one client gets its own
+// static fallback via `<!--[if mso]>` conditional comments, using the old
+// safe fixed-pixel-width table approach (fixed px, not %, so it can't
+// stretch). Every other client renders the real scrolling rail.
+function emkResponsiveStyleBlock() {
+  return `
+    <style>
+      .emk-scroll {
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        -ms-overflow-style: none;
       }
-      break;
-    }
-    case 'viewed_category': {
-      const categoryId = segment.value;
-      if (categoryId) {
-        const productIds = (await Product.find({ category: categoryId }).select('_id')).map((p) => p._id);
-        const subs = await EmailSubscriber.find({
-          status: 'subscribed',
-          'viewedProducts.product': { $in: productIds },
-        }).select('email name userId role');
-        subs.forEach((s) => add(s.email, s.name, s.userId, s.role));
+      .emk-scroll::-webkit-scrollbar { display: none; height: 0; width: 0; }
+      .emk-card { scroll-snap-align: start; }
+      @media only screen and (max-width: 480px) {
+        .emk-card { width: 130px !important; max-width: 130px !important; }
+        .emk-card-img { height: 114px !important; }
+        .emk-card-title { font-size: 12px !important; }
+        .emk-hero-img { max-height: 220px !important; }
+        .emk-body-text { font-size: 14.5px !important; line-height: 1.6 !important; }
+        .emk-section-title { font-size: 14px !important; }
       }
-      break;
-    }
-    case 'custom_emails': {
-      const list = Array.isArray(segment.value) ? segment.value : String(segment.value || '').split(/[\s,;]+/);
-      list.filter(Boolean).forEach((e) => add(e, ''));
-      break;
-    }
-    case 'all_subscribers':
-    default: {
-      const subs = await EmailSubscriber.find({ status: 'subscribed' }).select('email name userId role');
-      subs.forEach((s) => add(s.email, s.name, s.userId, s.role));
-      break;
-    }
-  }
-
-  return Array.from(out.values());
+      @media only screen and (min-width: 481px) {
+        .emk-card { width: 164px !important; max-width: 164px !important; }
+        .emk-card-img { height: 142px !important; }
+      }
+    </style>`;
 }
 
-// Lightweight count-only version for the admin UI's "recipient preview"
-// (avoids materializing full recipient objects for very large segments).
-async function estimateSegmentCount(segment) {
-  switch (segment.type) {
-    case 'buyers':
-      return User.countDocuments({ role: 'buyer', isActive: true });
-    case 'sellers':
-      return User.countDocuments({ role: { $in: ['wholesaler', 'retailer'] }, isActive: true });
-    case 'guests':
-      return EmailSubscriber.countDocuments({ status: 'subscribed', userId: null });
-    case 'searched_term':
-      return EmailSubscriber.countDocuments({ status: 'subscribed', 'searchHistory.term': String(segment.value || '').trim().toLowerCase() });
-    case 'viewed_category': {
-      if (!segment.value) return 0;
-      const productIds = (await Product.find({ category: segment.value }).select('_id')).map((p) => p._id);
-      return EmailSubscriber.countDocuments({ status: 'subscribed', 'viewedProducts.product': { $in: productIds } });
-    }
-    case 'custom_emails': {
-      const list = Array.isArray(segment.value) ? segment.value : String(segment.value || '').split(/[\s,;]+/);
-      return list.filter(Boolean).length;
-    }
-    case 'all_subscribers':
-    default:
-      return EmailSubscriber.countDocuments({ status: 'subscribed' });
-  }
+// ---------------------------------------------------------------------------
+// Single product card (used inside the scroll rail)
+// ---------------------------------------------------------------------------
+function productCardHtml(p, campaignClickUrl) {
+  const url = campaignClickUrl
+    ? `${campaignClickUrl}?redirect=${encodeURIComponent(`${FRONTEND_URL}/product-detail.html?id=${p.id}`)}`
+    : `${FRONTEND_URL}/product-detail.html?id=${p.id}`;
+
+  const img = p.image || NO_IMAGE_FALLBACK;
+  const name = (p.name || 'Product').toString();
+  const sellerLabel = p.sellerType || 'Retail seller';
+
+  const hasDiscount = p.originalPrice && Number(p.originalPrice) > Number(p.price);
+  const discountPct = hasDiscount
+    ? (p.discountPercent || Math.round((1 - Number(p.price) / Number(p.originalPrice)) * 100))
+    : null;
+
+  const priceHtml = hasDiscount
+    ? `<span style="font-weight:800;color:${COLORS.accent};font-size:13.5px;">${money(p.price)}</span>
+       <div style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-top:1px;">${money(p.originalPrice)}</div>`
+    : `<span style="font-weight:800;color:${COLORS.ink};font-size:13.5px;">${money(p.price)}</span>`;
+
+  const discountBadge = hasDiscount
+    ? `<span style="position:absolute;top:8px;left:8px;background:${COLORS.accent};color:#ffffff;font-size:10px;font-weight:800;letter-spacing:.2px;padding:3px 7px;border-radius:20px;line-height:1;">-${discountPct}%</span>`
+    : '';
+
+  const hotBadge = p.isHot
+    ? `<span style="position:absolute;top:8px;right:8px;background:#14151a;color:#ffffff;font-size:10px;font-weight:800;padding:3px 8px;border-radius:20px;line-height:1;white-space:nowrap;">🔥 Hot</span>`
+    : '';
+
+  return `
+    <a href="${url}" target="_blank" class="emk-card"
+       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;white-space:normal;
+              margin:0 10px 0 0;text-decoration:none;background:${COLORS.card};
+              border:1px solid ${COLORS.border};border-radius:14px;overflow:hidden;
+              box-shadow:0 1px 3px rgba(16,29,49,0.07);">
+      <div style="position:relative;width:100%;background:${COLORS.chip};line-height:0;">
+        <img class="emk-card-img" src="${img}" width="150" alt=""
+             style="display:block;width:100%;height:128px;object-fit:cover;background:${COLORS.chip};">
+        ${discountBadge}
+        ${hotBadge}
+      </div>
+      <div style="padding:10px 11px 12px;">
+        <div class="emk-card-title" style="font-size:12.5px;font-weight:600;color:${COLORS.ink};
+             line-height:1.35;height:33px;overflow:hidden;margin-bottom:6px;word-break:break-word;">
+          ${name}
+        </div>
+        <div style="font-size:10.5px;color:${COLORS.muted};margin-bottom:8px;">🏬 ${sellerLabel}</div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+          <tr>
+            <td valign="middle" style="text-align:left;">${priceHtml}</td>
+            <td valign="middle" width="26" style="text-align:right;">
+              <span style="display:inline-block;width:22px;height:22px;line-height:22px;text-align:center;
+                    border-radius:50%;background:${COLORS.chip};color:${COLORS.ink};font-size:12px;font-weight:700;">→</span>
+            </td>
+          </tr>
+        </table>
+      </div>
+    </a>`;
 }
 
-// Renders the final HTML for one recipient (used both for real sends and
-// for the admin's "Preview" button). Pass `log` (an EmailSendLog document,
-// already saved so it has a trackingToken) to wire up real open/click
-// tracking — omit it for previews where tracking isn't meaningful.
-async function renderForRecipient(campaign, subscriber, log = null) {
-  let recommendedProducts = [];
-  const wantsRecs =
-    campaign.contentType === 'auto_recommendation' ||
-    /\{\{\s*recommended_products\s*\}\}/i.test(campaign.bodyHtml || '');
-  if (wantsRecs && campaign.recommendedProductCount > 0) {
-    recommendedProducts = await getRecommendedProducts(subscriber, campaign.recommendedProductCount);
+// A trailing "See all" card at the end of the rail, matching card sizing.
+function viewAllCardHtml(viewAllUrl) {
+  if (!viewAllUrl) return '';
+  return `
+    <a href="${viewAllUrl}" target="_blank" class="emk-card"
+       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;height:206px;
+              white-space:normal;margin:0 10px 0 0;text-decoration:none;
+              border:1.5px dashed ${COLORS.border};border-radius:14px;
+              background:${COLORS.bg};text-align:center;">
+      <table role="presentation" width="100%" height="206" cellpadding="0" cellspacing="0">
+        <tr>
+          <td align="center" valign="middle" style="padding:0 14px;">
+            <span style="font-size:20px;display:block;margin-bottom:8px;">→</span>
+            <span style="font-size:12.5px;font-weight:700;color:${COLORS.accent};">See all deals</span>
+          </td>
+        </tr>
+      </table>
+    </a>`;
+}
+
+// Static fixed-pixel-width fallback table for Windows desktop Outlook only
+// (rendered inside `<!--[if mso]>`). Fixed px widths so it can never stretch.
+function outlookFallbackGridHtml(products, campaignClickUrl) {
+  if (!products || !products.length) return '';
+  const capped = products.slice(0, 4);
+
+  const cellHtmlArr = capped.map((p) => {
+    const url = campaignClickUrl
+      ? `${campaignClickUrl}?redirect=${encodeURIComponent(`${FRONTEND_URL}/product-detail.html?id=${p.id}`)}`
+      : `${FRONTEND_URL}/product-detail.html?id=${p.id}`;
+    const img = p.image || NO_IMAGE_FALLBACK;
+    const priceHtml = p.originalPrice && Number(p.originalPrice) > Number(p.price)
+      ? `<span style="font-weight:800;color:${COLORS.accent};">${money(p.price)}</span>
+         <span style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-left:6px;">${money(p.originalPrice)}</span>`
+      : `<span style="font-weight:800;color:${COLORS.ink};">${money(p.price)}</span>`;
+    return `
+      <td width="260" valign="top" style="padding:8px;">
+        <a href="${url}" target="_blank" style="text-decoration:none;display:block;border:1px solid ${COLORS.border};border-radius:12px;overflow:hidden;background:${COLORS.card};">
+          <img src="${img}" width="260" height="150" alt="" style="display:block;width:260px;height:150px;object-fit:cover;background:${COLORS.chip};">
+          <div style="padding:12px 14px;">
+            <div style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;">${(p.name || 'Product').toString()}</div>
+            <div style="font-size:14px;">${priceHtml}</div>
+          </div>
+        </a>
+      </td>`;
+  });
+
+  let rowsHtml = '';
+  for (let i = 0; i < cellHtmlArr.length; i += 2) {
+    rowsHtml += `<tr>${cellHtmlArr[i]}${cellHtmlArr[i + 1] || '<td width="260"></td>'}</tr>`;
   }
 
-  const unsubscribeUrl = `${API_BASE}/marketing/email/unsubscribe/${subscriber.unsubscribeToken}`;
-  const clickTrackingBaseUrl = log ? `${API_BASE}/marketing/email/click/${log.trackingToken}` : null;
-  const openPixelUrl = log ? `${API_BASE}/marketing/email/open/${log.trackingToken}.png` : null;
+  return `<table role="presentation" width="536" cellpadding="0" cellspacing="0" align="center">${rowsHtml}</table>`;
+}
 
-  return promotionalCampaignTemplate({
-    campaign,
-    subscriber,
-    recommendedProducts,
-    unsubscribeUrl,
-    clickTrackingBaseUrl,
-    openPixelUrl,
+// ---------------------------------------------------------------------------
+// Public: horizontally-scrolling product rail (+ Outlook desktop fallback)
+// ---------------------------------------------------------------------------
+function productGridHtml(products, campaignClickUrl, viewAllUrl) {
+  if (!products || !products.length) return '';
+
+  const cardsHtml = products.map((p) => productCardHtml(p, campaignClickUrl)).join('');
+  const trailingCard = viewAllCardHtml(viewAllUrl);
+
+  return `
+    <!--[if mso]>
+    ${outlookFallbackGridHtml(products, campaignClickUrl)}
+    <![endif]-->
+    <!--[if !mso]><!-->
+    <div class="emk-scroll" style="overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
+         white-space:nowrap;scroll-snap-type:x proximity;padding:4px 2px 14px;margin:0 -2px 4px;">
+      ${cardsHtml}${trailingCard}
+    </div>
+    <!--<![endif]-->`;
+}
+
+function unsubscribeFooterHtml(unsubscribeUrl) {
+  return `
+    <p style="margin:22px 0 0;font-size:11.5px;color:${COLORS.muted};text-align:center;line-height:1.6;">
+      You're receiving this because you browsed or shopped on Six Star Suppliers.<br>
+      <a href="${unsubscribeUrl}" style="color:${COLORS.muted};text-decoration:underline;">Unsubscribe</a> from promotional emails ·
+      <a href="mailto:${SUPPORT_EMAIL}" style="color:${COLORS.muted};text-decoration:underline;">Contact support</a>
+    </p>`;
+}
+
+// ---------------------------------------------------------------------------
+// Main promotional / recommendation campaign email
+// ---------------------------------------------------------------------------
+function promotionalCampaignTemplate({
+  campaign,
+  subscriber,
+  recommendedProducts = [],
+  unsubscribeUrl,
+  clickTrackingBaseUrl, // e.g. https://api.../marketing/email/click/:token?url=  (token per-recipient)
+  openPixelUrl, // e.g. https://api.../marketing/email/open/:token.png
+}) {
+  const name = subscriber?.name ? subscriber.name.split(' ')[0] : 'there';
+
+  // Merge simple placeholders in admin-authored copy.
+  let bodyHtml = campaign.bodyHtml || '';
+  bodyHtml = bodyHtml.replace(/\{\{\s*name\s*\}\}/gi, name);
+
+  const hasRecommendedPlaceholder = /\{\{\s*recommended_products\s*\}\}/i.test(bodyHtml);
+  const gridHtml = recommendedProducts.length
+    ? productGridHtml(recommendedProducts, clickTrackingBaseUrl, campaign.viewAllUrl)
+    : '';
+
+  if (hasRecommendedPlaceholder) {
+    bodyHtml = bodyHtml.replace(/\{\{\s*recommended_products\s*\}\}/gi, gridHtml);
+  } else if (campaign.contentType === 'auto_recommendation' && gridHtml) {
+    const sectionLabel = subscriber?.searchHistory?.length || subscriber?.viewedProducts?.length
+      ? 'Recommended for you'
+      : 'You might also like';
+    bodyHtml += `
+      <h3 class="emk-section-title" style="margin:24px 0 10px;font-size:15px;color:${COLORS.ink};">
+        🔥 ${sectionLabel}
+      </h3>
+      ${gridHtml}`;
+  }
+
+  const heroHtml = campaign.heroImageUrl
+    ? `<img class="emk-hero-img" src="${campaign.heroImageUrl}" alt="" style="width:100%;max-width:100%;height:auto;max-height:320px;object-fit:cover;border-radius:12px;display:block;margin-bottom:18px;">`
+    : '';
+
+  const ctaHtml = campaign.ctaUrl
+    ? button(
+        clickTrackingBaseUrl ? `${clickTrackingBaseUrl}?redirect=${encodeURIComponent(campaign.ctaUrl)}` : campaign.ctaUrl,
+        campaign.ctaText || 'Shop Now'
+      )
+    : '';
+
+  const pixelHtml = openPixelUrl
+    ? `<img src="${openPixelUrl}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px;">`
+    : '';
+
+  const bodyWithExtras = `
+    ${emkResponsiveStyleBlock()}
+    ${heroHtml}
+    <div class="emk-body-text" style="font-size:14px;line-height:1.7;color:${COLORS.ink};white-space:pre-wrap;word-break:break-word;">${bodyHtml}</div>
+    ${ctaHtml}
+    ${unsubscribeFooterHtml(unsubscribeUrl)}
+    ${pixelHtml}
+  `;
+
+  return baseLayout({
+    preheader: campaign.previewText || campaign.subject,
+    eyebrow: campaign.fromName || 'Six Star Suppliers',
+    title: campaign.subject,
+    intro: '',
+    bodyHtml: bodyWithExtras,
   });
 }
 
-// Sends immediately (also used by the scheduler once scheduledAt is due).
-// Runs in small batches with a short delay between each to stay friendly
-// to the transactional email provider's rate limits.
-async function sendCampaign(campaignId) {
-  const campaign = await EmailCampaign.findById(campaignId);
-  if (!campaign) throw new Error('Campaign not found');
-  if (!['draft', 'scheduled'].includes(campaign.status)) {
-    throw new Error(`Campaign is already ${campaign.status}`);
-  }
-
-  campaign.status = 'sending';
-  await campaign.save();
-
-  try {
-    const recipients = await resolveSegmentRecipients(campaign.segment);
-    campaign.stats.totalRecipients = recipients.length;
-    await campaign.save();
-
-    const BATCH_SIZE = 20;
-    const DELAY_MS = 800;
-
-    for (let i = 0; i < recipients.length; i += BATCH_SIZE) {
-      const batch = recipients.slice(i, i + BATCH_SIZE);
-      await Promise.all(
-        batch.map(async (r) => {
-          try {
-            const subscriber = await ensureSubscriberForRecipient(r);
-            if (!subscriber || subscriber.status === 'unsubscribed') return;
-
-            const log = await EmailSendLog.create({
-              campaign: campaign._id,
-              subscriber: subscriber._id,
-              email: subscriber.email,
-              status: 'queued',
-            });
-
-            const html = await renderForRecipient(campaign, subscriber, log);
-
-            await sendEmail({
-              to: subscriber.email,
-              subject: campaign.subject,
-              html,
-              sender: 'info',
-            });
-
-            log.status = 'sent';
-            log.sentAt = new Date();
-            await log.save();
-
-            subscriber.emailsSentCount += 1;
-            subscriber.lastEmailSentAt = new Date();
-            await subscriber.save();
-
-            campaign.stats.sent += 1;
-          } catch (err) {
-            campaign.stats.failed += 1;
-            console.error(`Campaign ${campaign._id} send failed for ${r.email}:`, err.body || err.message);
-          }
-        })
-      );
-      await campaign.save();
-      if (i + BATCH_SIZE < recipients.length) await new Promise((res) => setTimeout(res, DELAY_MS));
-    }
-
-    campaign.status = 'sent';
-    campaign.sentAt = new Date();
-    await campaign.save();
-  } catch (err) {
-    campaign.status = 'failed';
-    campaign.lastError = err.message;
-    await campaign.save();
-    throw err;
-  }
-
-  return campaign;
-}
-
-async function scheduleCampaign(campaignId, scheduledAt) {
-  const campaign = await EmailCampaign.findById(campaignId);
-  if (!campaign) throw new Error('Campaign not found');
-  if (!['draft', 'scheduled'].includes(campaign.status)) {
-    throw new Error(`Cannot schedule a campaign that is already ${campaign.status}`);
-  }
-  campaign.scheduledAt = new Date(scheduledAt);
-  campaign.status = 'scheduled';
-  await campaign.save();
-  return campaign;
-}
-
-async function cancelScheduledCampaign(campaignId) {
-  const campaign = await EmailCampaign.findById(campaignId);
-  if (!campaign) throw new Error('Campaign not found');
-  if (campaign.status !== 'scheduled') throw new Error('Only scheduled campaigns can be cancelled');
-  campaign.status = 'cancelled';
-  campaign.scheduledAt = null;
-  await campaign.save();
-  return campaign;
+// Small standalone confirmation page shown right after clicking Unsubscribe
+// (served directly by the backend — no frontend page needed).
+function unsubscribeConfirmedPageHtml({ email }) {
+  return `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unsubscribed — Six Star Suppliers</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;background:${COLORS.bg};margin:0;padding:60px 20px;text-align:center;">
+  <div style="max-width:420px;margin:0 auto;background:${COLORS.card};border-radius:16px;padding:36px;box-shadow:0 10px 40px rgba(16,29,49,0.10);">
+    <div style="font-size:40px;margin-bottom:12px;">✅</div>
+    <h1 style="font-size:20px;color:${COLORS.ink};margin:0 0 10px;">You've been unsubscribed</h1>
+    <p style="font-size:14px;color:${COLORS.muted};line-height:1.6;">${email ? `${email} will` : 'You will'} no longer receive promotional emails from Six Star Suppliers. You may still receive essential account and order emails.</p>
+    <a href="${FRONTEND_URL}" style="display:inline-block;margin-top:18px;padding:12px 24px;background:${COLORS.accent};color:#fff;border-radius:10px;text-decoration:none;font-weight:600;font-size:14px;">Back to Six Star Suppliers</a>
+  </div>
+</body></html>`;
 }
 
 module.exports = {
-  resolveSegmentRecipients,
-  estimateSegmentCount,
-  renderForRecipient,
-  sendCampaign,
-  scheduleCampaign,
-  cancelScheduledCampaign,
-  FRONTEND_URL,
-  API_BASE,
+  productGridHtml,
+  promotionalCampaignTemplate,
+  unsubscribeConfirmedPageHtml,
 };
