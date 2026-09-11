@@ -6,6 +6,7 @@ const ProductVariant = require('../models/ProductVariant');
 const Agent = require('../models/Agent');
 const Commission = require('../models/Commission'); // NEW — agent commission now lives here, not order.commissionAmount
 const FlashSale = require('../models/FlashSale');
+const TownLocation = require('../models/TownLocation'); // NEW — Nairobi manual fee + pickup station lookup
 const { User } = require('../models/User');
 const safeSendEmail = require('../utils/safeSendEmail');
 const getAdminEmails = require('../utils/getAdminEmails');
@@ -63,6 +64,35 @@ async function resolveLineCommission(categoryId, unitPrice) {
   const commissionAmountPerUnit = Math.round(unitPrice * (rate / 100));
   const sellerPayoutPerUnit = unitPrice - commissionAmountPerUnit;
   return { rate, commissionAmountPerUnit, sellerPayoutPerUnit };
+}
+
+// NEW — resolves the authoritative delivery-town record from the buyer's
+// county + town strings. This is looked up server-side (never trusted from
+// the client) because it decides HOW MUCH is charged for Nairobi orders.
+// Returns safe defaults (treated as "not Nairobi, no pickup station") if the
+// town isn't found, so an unrecognized/legacy town never breaks checkout —
+// it just falls through to the normal dynamic shipping calculation exactly
+// like it did before this feature existed.
+async function resolveTownLocation(shippingAddress) {
+  const county = (shippingAddress?.county || '').trim();
+  const town = (shippingAddress?.city || '').trim();
+  if (!county || !town) {
+    return { isNairobi: false, nairobiManualFee: 0, hasPickupStation: false, pickupStationAddress: '', county, town };
+  }
+
+  const record = await TownLocation.findOne({ county, town, isActive: true });
+  if (!record) {
+    return { isNairobi: false, nairobiManualFee: 0, hasPickupStation: false, pickupStationAddress: '', county, town };
+  }
+
+  return {
+    isNairobi: !!record.isNairobi,
+    nairobiManualFee: record.isNairobi ? record.nairobiManualFee || 0 : 0,
+    hasPickupStation: !!record.hasPickupStation,
+    pickupStationAddress: record.hasPickupStation ? record.pickupStationAddress || '' : '',
+    county,
+    town,
+  };
 }
 
 // @desc    Buyer places an order
@@ -318,12 +348,25 @@ const createOrder = asyncHandler(async (req, res) => {
     checkAndSendStockReminder(product._id).catch(() => {});
   }
 
+  // ---------------- TOWN / NAIROBI / PICKUP STATION LOOKUP (NEW) ----------------
+  // Resolved server-side from TownLocation — the client's shippingAddress may
+  // SAY it's Nairobi / has a pickup station, but only this lookup decides
+  // pricing and what gets stored. Unknown/legacy towns fall back to "not
+  // Nairobi, no pickup station" and behave exactly as before this feature.
+  const townInfo = await resolveTownLocation(shippingAddress);
+
   // ---------------- DYNAMIC SHIPPING ----------------
   const shippingLines = prepared.map(({ product, quantity }) => ({
     productId: product._id,
     quantity,
   }));
-  const shippingResult = await calculateDynamicShippingFee(shippingLines);
+
+  // Nairobi towns skip the weight-tier calculation entirely and use the
+  // admin-set flat fee for that specific town instead. Every other town —
+  // with or without a pickup station — is priced exactly as before.
+  const shippingResult = townInfo.isNairobi
+    ? { standardShippingFee: townInfo.nairobiManualFee, normalWeightTotalKg: 0, normalTierApplied: null, specialBreakdown: [] }
+    : await calculateDynamicShippingFee(shippingLines);
   const retailTransportFee = shippingResult.standardShippingFee || 0;
 
   const deliveryFeeTotal = retailTransportFee + wholesaleDeliveryTotal;
@@ -377,6 +420,8 @@ const createOrder = asyncHandler(async (req, res) => {
       transportFee: retailTransportFee,
       wholesaleDeliveryFee: wholesaleDeliveryTotal,
       notes: deliveryNotes,
+      isNairobiDelivery: townInfo.isNairobi,
+      nairobiManualFee: townInfo.isNairobi ? townInfo.nairobiManualFee : 0,
       normalWeightTotalKg: shippingResult.normalWeightTotalKg || 0,
       normalTierApplied: shippingResult.normalTierApplied
         ? {
@@ -389,7 +434,13 @@ const createOrder = asyncHandler(async (req, res) => {
         : { id: null, label: '', weightFrom: null, weightTo: null, price: 0 },
       specialShippingBreakdown: shippingResult.specialBreakdown || [],
     },
-    shippingAddress,
+    shippingAddress: {
+      ...shippingAddress,
+      county: townInfo.county,
+      isNairobi: townInfo.isNairobi,
+      hasPickupStation: townInfo.hasPickupStation,
+      pickupStationAddress: townInfo.pickupStationAddress,
+    },
     paymentStatus: 'pending_verification',
     agent: agentDoc ? agentDoc._id : null,
     agentCode: agentDoc ? agentDoc.code : '',
@@ -522,6 +573,7 @@ const trackOrderPublic = asyncHandler(async (req, res) => {
       totalAmount: order.totalAmount,
       deliveryFee: order.deliveryFee,
       deliveryDetails: order.deliveryDetails,
+      shippingAddress: order.shippingAddress,
       paymentStatus: order.paymentStatus,
       orderStatus: order.orderStatus,
       rejectionReason: order.rejectionReason,

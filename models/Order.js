@@ -64,11 +64,20 @@ const orderSchema = new Schema(
       wholesaleDeliveryFee: { type: Number, default: 0 },
       notes: { type: [String], default: [] },
 
-      // NEW — dynamic shipping breakdown snapshot (see utils/shippingFeeCalculator.js).
-      // transportFee above IS the resolved calculateDynamicShippingFee() total
+      // NEW — Nairobi manual-fee delivery. When true, transportFee above is
+      // the flat KSh amount the admin set for this specific Nairobi town
+      // (TownLocation.nairobiManualFee) rather than a weight-tier result.
+      isNairobiDelivery: { type: Boolean, default: false },
+      nairobiManualFee: { type: Number, default: 0 },
+
+      // Dynamic shipping breakdown snapshot (see utils/shippingFeeCalculator.js).
+      // transportFee IS the resolved calculateDynamicShippingFee() total
       // (normal-weight tier price + special-criteria fees) for every
-      // non-heavy-wholesale line in this order. These extra fields just keep
-      // the human-readable "why" alongside it for admin/support/email use.
+      // non-heavy-wholesale line in this order — UNLESS isNairobiDelivery is
+      // true, in which case these normal/special fields stay at their empty
+      // defaults since the dynamic calculation was skipped entirely for a
+      // Nairobi order. These extra fields just keep the human-readable "why"
+      // alongside it for admin/support/email use.
       normalWeightTotalKg: { type: Number, default: 0 },
       normalTierApplied: {
         id: { type: Schema.Types.ObjectId, default: null },
@@ -99,6 +108,14 @@ const orderSchema = new Schema(
       address: String,
       city: String,
       notes: String,
+
+      // NEW — resolved server-side from TownLocation at order-creation time
+      // (never trusted blind from the client), so admin views and order
+      // emails can describe delivery accurately without a second lookup.
+      county: { type: String, default: '' },
+      isNairobi: { type: Boolean, default: false },
+      hasPickupStation: { type: Boolean, default: false },
+      pickupStationAddress: { type: String, default: '' },
     },
 
     // --- Payment method: how this order's payment is collected/verified ---

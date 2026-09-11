@@ -114,6 +114,8 @@ app.use('/api/sharing', require('./routes/sharingRoutes'));
 app.use('/api/sharing', require('./routes/agentWhatsappRoutes')); // NEW — agent WhatsApp product promo generator
 
 
+app.use('/api/town-locations', require('./routes/townLocationRoutes'));
+
 const merchantFeedRouter = require('./routes/merchantFeed.route');
 
 console.log('MERCHANT FEED EXPORT:', merchantFeedRouter);

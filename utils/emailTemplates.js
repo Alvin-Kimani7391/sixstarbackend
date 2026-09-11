@@ -367,6 +367,40 @@ function orderItemsTable(items) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">${rows}</table>`;
 }
 
+
+// Mirrors the checkout preview 1:1 so emails never contradict what the buyer
+// saw: pickup-station towns show the pickup address; everything else shows
+// the plain "Town — transport charged" line (Nairobi or dynamic-tier fee).
+function deliveryInfoBox(order) {
+  const sa = order.shippingAddress || {};
+  const dd = order.deliveryDetails || {};
+
+  if (sa.hasPickupStation && sa.pickupStationAddress) {
+    return `
+      <div style="background:${COLORS.chip};border:1px solid rgba(242,169,59,.3);border-radius:10px;padding:14px 16px;margin:8px 0 20px;">
+        <div style="font-size:12px;font-weight:700;color:${COLORS.accentDark};text-transform:uppercase;letter-spacing:0.4px;margin-bottom:6px;">
+          📍 Pickup Station
+        </div>
+        <div style="font-size:13px;color:${COLORS.ink};line-height:1.6;">
+          Your order will be available for pickup soon at:<br>
+          <strong>${sa.pickupStationAddress}</strong>
+          ${sa.city ? `<br><span style="color:${COLORS.muted};">${sa.city}${sa.county ? ', ' + sa.county : ''}</span>` : ''}
+        </div>
+      </div>`;
+  }
+
+  const townLabel = sa.city || 'Delivery';
+  const feeAmount = sa.isNairobi ? (dd.nairobiManualFee || 0) : (dd.transportFee || order.deliveryFee || 0);
+
+  return `
+    <div style="background:${COLORS.chip};border-radius:10px;padding:12px 16px;margin:8px 0 20px;">
+      <div style="font-size:13px;color:${COLORS.ink};">
+        <strong>${townLabel}</strong>${sa.county ? `, ${sa.county}` : ''} — Transport charged: <strong>${money(feeAmount)}</strong>
+      </div>
+    </div>`;
+}
+
+
 /* ================================================================ */
 /* AUTH EMAILS                                                       */
 /* ================================================================ */
@@ -477,7 +511,7 @@ function emailOtpTemplate({ name, code }) {
 function orderConfirmationTemplate({ order, buyerName }) {
   const trackUrl = `${FRONTEND_URL}/profile.html?tab=orders&orderId=${order._id}`;
   const bodyHtml = `
-    ${infoCard([
+        ${infoCard([
       ['Order Number', order.orderNumber],
       ['Order Date', fmtDate(order.createdAt || Date.now())],
       [
@@ -485,6 +519,7 @@ function orderConfirmationTemplate({ order, buyerName }) {
       order.paymentMethod === 'stk' ? 'Confirmed — Paid via M-Pesa' : 'Awaiting verification',
     ],
     ])}
+    ${deliveryInfoBox(order)}
     <h3 style="margin:0 0 4px;font-size:14px;color:${COLORS.ink};">Your Items</h3>
     ${orderItemsTable(order.items)}
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">
@@ -549,6 +584,7 @@ function newOrderAdminTemplate({ order, buyerName }) {
       ['Total', money(order.totalAmount)],
       ['Items', String(order.items.length)],
     ])}
+    ${deliveryInfoBox(order)}
     ${orderItemsTable(order.items)}
     ${button(verifyUrl, 'Verify Payment', COLORS.warning)}
   `;
@@ -578,6 +614,7 @@ function stkPaymentReceivedAdminTemplate({ order, buyerName }) {
       ['Total', money(order.totalAmount)],
       ['M-Pesa Receipt', order.mpesaCode || 'N/A'],
     ])}
+    ${deliveryInfoBox(order)}
     ${orderItemsTable(order.items)}
     ${button(viewUrl, 'View Order', COLORS.success)}
   `;
