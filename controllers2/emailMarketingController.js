@@ -15,6 +15,7 @@ const {
 const { ensureSubscriberForRecipient, unsubscribeByToken } = require('../services/subscriberService');
 const { unsubscribeConfirmedPageHtml } = require('../utils/marketingEmailTemplates');
 const { FRONTEND_URL, BRAND_NAME } = require('../services/shareMessageService');
+const { getMergedViewedProducts } = require('../services/recommendationService');
 
 // ============================================================
 // CAMPAIGNS (admin)
@@ -249,7 +250,31 @@ const getSubscriberById = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error('Subscriber not found');
   }
-  res.json({ success: true, subscriber });
+
+  // Merge in the linked buyer's own (already-accurate) User.recentlyViewed,
+  // so a registered buyer's real browsing history shows here even for
+  // views that happened before the storefront's guest-capture script was
+  // recording into EmailSubscriber directly.
+  const merged = await getMergedViewedProducts(subscriber);
+  const mergedIds = merged.map((v) => String(v.product));
+  const alreadyPopulatedIds = new Set((subscriber.viewedProducts || []).map((v) => String(v.product?._id || v.product)));
+  const extraIds = mergedIds.filter((id) => !alreadyPopulatedIds.has(id));
+
+  let mergedViewedProducts = subscriber.viewedProducts || [];
+  if (extraIds.length) {
+    const extraProducts = await Product.find({ _id: { $in: extraIds } }).select('name images finalPrice discountPercent');
+    const extraById = new Map(extraProducts.map((p) => [String(p._id), p]));
+    const extraEntries = merged
+      .filter((v) => extraById.has(String(v.product)))
+      .map((v) => ({ product: extraById.get(String(v.product)), viewedAt: v.viewedAt, viewCount: 1, _fromAccountHistory: true }));
+    mergedViewedProducts = [...mergedViewedProducts.map((v) => v.toObject ? v.toObject() : v), ...extraEntries]
+      .sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt));
+  }
+
+  const subscriberJson = subscriber.toObject();
+  subscriberJson.viewedProducts = mergedViewedProducts;
+
+  res.json({ success: true, subscriber: subscriberJson });
 });
 
 const updateSubscriberTags = asyncHandler(async (req, res) => {

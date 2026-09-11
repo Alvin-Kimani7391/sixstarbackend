@@ -1,4 +1,5 @@
 const Product = require('../models/Product');
+const { User } = require('../models/User');
 
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -17,13 +18,42 @@ function toCard(p) {
   };
 }
 
+// A registered buyer already has accurate, working view-history on the User
+// model itself (User.recentlyViewed — populated by POST
+// /users/recently-viewed/:productId every time they open a product while
+// logged in). EmailSubscriber.viewedProducts only fills in once the
+// storefront's guest-capture script starts firing (see
+// frontend/guest-capture.js) — for an existing buyer that's a gap in NEW
+// data, not old data. This merges the two so recommendations (and the CRM
+// subscriber detail view, see emailMarketingController.getSubscriberById)
+// are accurate immediately, not just for activity going forward.
+async function getMergedViewedProducts(subscriber) {
+  const own = (subscriber?.viewedProducts || []).map((v) => ({ product: v.product, viewedAt: v.viewedAt }));
+  if (!subscriber?.userId) return own;
+
+  try {
+    const user = await User.findById(subscriber.userId).select('recentlyViewed role');
+    if (!user || user.role !== 'buyer' || !user.recentlyViewed?.length) return own;
+
+    const seen = new Set(own.map((v) => String(v.product)));
+    const fromUser = user.recentlyViewed
+      .filter((v) => v.product && !seen.has(String(v.product)))
+      .map((v) => ({ product: v.product, viewedAt: v.viewedAt }));
+
+    return [...own, ...fromUser].sort((a, b) => new Date(b.viewedAt) - new Date(a.viewedAt));
+  } catch (_) {
+    return own;
+  }
+}
+
 // Builds a "Recommended for you" list for one subscriber, combining:
 //   1. Products in the same categories as things they recently viewed
 //   2. Products matching their recent search terms
 //   3. A fallback of generally popular/hot-deal active products
 // so the block is never empty even for a subscriber with thin history.
 async function getRecommendedProducts(subscriber, limit = 4) {
-  const excludeIds = (subscriber?.viewedProducts || []).map((v) => v.product);
+  const mergedViewed = await getMergedViewedProducts(subscriber);
+  const excludeIds = mergedViewed.map((v) => v.product);
   const picks = [];
   const seen = new Set();
 
@@ -39,8 +69,8 @@ async function getRecommendedProducts(subscriber, limit = 4) {
   }
 
   // 1) Same categories as recently viewed products
-  if (subscriber?.viewedProducts?.length) {
-    const viewedIds = subscriber.viewedProducts.slice(0, 5).map((v) => v.product);
+  if (mergedViewed.length) {
+    const viewedIds = mergedViewed.slice(0, 5).map((v) => v.product);
     const viewedDocs = await Product.find({ _id: { $in: viewedIds } }).select('category');
     const categoryIds = [...new Set(viewedDocs.map((d) => String(d.category)).filter(Boolean))];
     if (categoryIds.length) {
@@ -92,4 +122,4 @@ async function getRecommendedProducts(subscriber, limit = 4) {
   return picks.slice(0, limit).map(toCard);
 }
 
-module.exports = { getRecommendedProducts };
+module.exports = { getRecommendedProducts, getMergedViewedProducts };

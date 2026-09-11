@@ -1,5 +1,6 @@
 const asyncHandler = require('express-async-handler');
-const { getOrCreateSubscriber, recordSearch, recordView } = require('../services/subscriberService');
+const { getOrCreateSubscriber, recordSearch, recordView, findSubscriber } = require('../services/subscriberService');
+const { getMergedViewedProducts } = require('../services/recommendationService');
 
 // All of these are PUBLIC — called from the storefront for both guests and
 // logged-in buyers (the frontend passes `email` when it already knows who's
@@ -42,4 +43,46 @@ const trackView = asyncHandler(async (req, res) => {
   res.status(204).end();
 });
 
-module.exports = { captureEmail, trackSearch, trackView };
+// @desc    Read-only — a person's own recent searches + recently viewed
+//          products, keyed by their guestId and/or (if logged in) email.
+//          Powers the header search bar's "recent searches" dropdown.
+//          Never creates a subscriber record — a fresh visitor just gets
+//          empty arrays back.
+// @route   GET /api/guest/my-activity?guestId=&email=
+const getMyActivity = asyncHandler(async (req, res) => {
+  const { guestId, email } = req.query;
+  if (!guestId && !email) {
+    return res.json({ success: true, searches: [], viewedProducts: [] });
+  }
+
+  const subscriber = await findSubscriber({ email, guestId });
+  if (!subscriber) {
+    return res.json({ success: true, searches: [], viewedProducts: [] });
+  }
+
+  const searches = (subscriber.searchHistory || [])
+    .slice()
+    .sort((a, b) => new Date(b.lastSearchedAt) - new Date(a.lastSearchedAt))
+    .slice(0, 8)
+    .map((s) => s.term);
+
+  const merged = await getMergedViewedProducts(subscriber);
+  const Product = require('../models/Product');
+  const productIds = merged.slice(0, 8).map((v) => v.product);
+  const products = await Product.find({ _id: { $in: productIds }, isActive: true })
+    .select('name images finalPrice discountPercent status');
+
+  const productById = new Map(products.map((p) => [String(p._id), p]));
+  const viewedProducts = merged
+    .filter((v) => productById.has(String(v.product)) && productById.get(String(v.product)).status === 'active')
+    .slice(0, 8)
+    .map((v) => {
+      const p = productById.get(String(v.product));
+      const price = p.discountPercent ? Math.round(p.finalPrice * (1 - p.discountPercent / 100)) : p.finalPrice;
+      return { id: p._id, name: p.name, image: (p.images && p.images[0]) || '', price };
+    });
+
+  res.json({ success: true, searches, viewedProducts });
+});
+
+module.exports = { captureEmail, trackSearch, trackView, getMyActivity };

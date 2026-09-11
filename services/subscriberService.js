@@ -1,5 +1,21 @@
 const EmailSubscriber = require('../models/EmailSubscriber');
 
+// Read-only — never creates a record. Used by the storefront to show a
+// person their own recent searches/views without generating a phantom
+// subscriber for every idle page load.
+async function findSubscriber({ email, guestId }) {
+  email = (email || '').trim().toLowerCase();
+  if (email) {
+    const byEmail = await EmailSubscriber.findOne({ email });
+    if (byEmail) return byEmail;
+  }
+  if (guestId) {
+    const byGuest = await EmailSubscriber.findOne({ guestId });
+    if (byGuest) return byGuest;
+  }
+  return null;
+}
+
 // Finds a subscriber by email, or by guestId (pre-capture anonymous
 // activity), or creates a brand-new record. If both an existing guestId
 // record AND the email are provided and they differ, the guest record is
@@ -92,6 +108,7 @@ async function unsubscribeByToken(token) {
 module.exports = {
   getOrCreateSubscriber,
   ensureSubscriberForRecipient,
+  findSubscriber,
   recordSearch,
   recordView,
   unsubscribeByToken,
