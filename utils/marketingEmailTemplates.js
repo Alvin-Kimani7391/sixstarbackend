@@ -8,6 +8,49 @@
 // Usage:
 //   const { promotionalCampaignTemplate } = require('./marketingEmailTemplates');
 //   const html = promotionalCampaignTemplate({ campaign, subscriber, recommendedProducts, unsubscribeUrl, trackingPixelUrl });
+//
+// ---------------------------------------------------------------------------
+// REDESIGN NOTES — 2026-09-12
+// ---------------------------------------------------------------------------
+// 1) HEAD-INJECTED CSS (the actual mobile bug):
+//    baseLayout() from emailTemplates.js already has a working responsive
+//    <style> block, but it lives in the document <head> — that's WHY those
+//    transactional emails render correctly on phones. The old version of
+//    this file built its own <style> block (emkResponsiveStyleBlock) and
+//    dropped it into `bodyHtml`, which baseLayout places inside a <td> in
+//    the <body>. Plenty of mobile mail clients only honor <style> tags that
+//    live in <head> and strip (or ignore the @media rules inside) any
+//    <style> tag they find in the body. Result: on phones, the campaign
+//    email fell back to un-queried base styles and rendered like a
+//    shrunken desktop layout instead of a real mobile layout — exactly the
+//    symptom reported.
+//
+//    Fix: baseLayout() returns a finished HTML string. We don't touch
+//    emailTemplates.js — instead we splice our <style> block into that
+//    string's <head> ourselves (see injectStyleIntoHead below), so our
+//    media queries live in the one place every client actually respects.
+//
+// 2) MOBILE-FIRST SIZING:
+//    Card/hero/text sizing is now written so the DEFAULT (no media query
+//    required) values are the phone-appropriate ones, and a `min-width`
+//    query only *upsizes* for a wider preview pane. That way, even if some
+//    exotic client strips media queries entirely, a phone still sees the
+//    correctly-sized layout rather than a desktop one waiting to be
+//    shrunk down.
+//
+// 3) ANTI-STRETCH:
+//    - The product rail cards are still FIXED PIXEL WIDTH (never %), which
+//      is what actually prevents stretching in the scrolling rail. Do not
+//      change these to percentage widths — that's the exact regression
+//      that caused the stretching/oversized-image problem previously.
+//    - The one real stretch risk left was the classic Windows-desktop-
+//      Outlook fallback grid: Word's rendering engine ignores
+//      `object-fit`, so a plain `<img width height>` there squashes any
+//      image that isn't exactly the target aspect ratio. That's now
+//      rendered with the standard VML bulletproof-image pattern
+//      (`v:rect` + `v:fill type="frame"`), which crops-to-fill instead of
+//      stretching — still fully inside the existing `<!--[if mso]>` guard,
+//      so every other client is unaffected.
 
 const {
   baseLayout,
@@ -20,15 +63,25 @@ const {
 } = require('./emailTemplates');
 
 // ---------------------------------------------------------------------------
-// Styles
+// Head-injection helper
 // ---------------------------------------------------------------------------
-//
-// The product rail is a horizontally-scrolling strip (same idea as the
-// "Hot Deals" rail on the live site) instead of a 2-column table grid.
-// A fixed-width card looks right at any viewport — mobile just shows less
-// of the next card peeking in, desktop shows more cards at once — so we
-// don't need to fight with percentage widths (that's what was causing the
-// stretching/oversized-image problem before).
+// baseLayout() gives us back a complete <!DOCTYPE html>...<head>...</head>
+// document as a string. We splice our own <style> block right before
+// </head> so it lives in the same trusted location as baseLayout's own
+// responsive rules, instead of inside the body content.
+function injectStyleIntoHead(html, css) {
+  const styleTag = `<style>${css}</style>`;
+  if (html.includes('</head>')) {
+    return html.replace('</head>', `${styleTag}</head>`);
+  }
+  // Extremely defensive fallback — should never trigger against the real
+  // baseLayout() output, but guarantees we never silently drop the styles.
+  return styleTag + html;
+}
+
+// ---------------------------------------------------------------------------
+// Styles (now destined for <head>, not the body)
+// ---------------------------------------------------------------------------
 //
 // Horizontal scroll + hidden scrollbar works in: Apple Mail (iOS/macOS),
 // the Gmail app (iOS/Android), Gmail webmail, Yahoo Mail, Outlook.com,
@@ -39,32 +92,35 @@ const {
 // Word's engine, not a browser engine — it does not support overflow
 // scrolling, flexbox, or reliable position:absolute. There's no CSS trick
 // that makes a scroll rail work there. So that one client gets its own
-// static fallback via `<!--[if mso]>` conditional comments, using the old
-// safe fixed-pixel-width table approach (fixed px, not %, so it can't
-// stretch). Every other client renders the real scrolling rail.
-function emkResponsiveStyleBlock() {
+// static fallback via `<!--[if mso]>` conditional comments, using a
+// fixed-pixel-width table (never %, so it can't stretch), with crop-safe
+// VML images. Every other client renders the real scrolling rail.
+function marketingStyleSheet() {
   return `
-    <style>
-      .emk-scroll {
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-        -ms-overflow-style: none;
-      }
-      .emk-scroll::-webkit-scrollbar { display: none; height: 0; width: 0; }
-      .emk-card { scroll-snap-align: start; }
-      @media only screen and (max-width: 480px) {
-        .emk-card { width: 130px !important; max-width: 130px !important; }
-        .emk-card-img { height: 114px !important; }
-        .emk-card-title { font-size: 12px !important; }
-        .emk-hero-img { max-height: 220px !important; }
-        .emk-body-text { font-size: 14.5px !important; line-height: 1.6 !important; }
-        .emk-section-title { font-size: 14px !important; }
-      }
-      @media only screen and (min-width: 481px) {
-        .emk-card { width: 164px !important; max-width: 164px !important; }
-        .emk-card-img { height: 142px !important; }
-      }
-    </style>`;
+    .emk-scroll {
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .emk-scroll::-webkit-scrollbar { display: none; height: 0; width: 0; }
+    .emk-card { scroll-snap-align: start; }
+
+    /* Base sizes below (set inline on the elements) are already tuned for
+       a ~360-430px phone screen, since that's where most opens happen.
+       These queries only ENHANCE for a wider preview pane — they are not
+       relied upon to make things smaller, so a client that ignores media
+       queries still shows a correctly-sized mobile layout by default. */
+    @media only screen and (min-width: 481px) {
+      .emk-card { width: 172px !important; max-width: 172px !important; }
+      .emk-card-img { height: 148px !important; }
+      .emk-hero-img { max-height: 320px !important; }
+    }
+    @media only screen and (max-width: 359px) {
+      .emk-card { width: 130px !important; max-width: 130px !important; }
+      .emk-card-img { height: 112px !important; }
+      .emk-card-title { font-size: 12px !important; height: 31px !important; }
+    }
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,9 +141,9 @@ function productCardHtml(p, campaignClickUrl) {
     : null;
 
   const priceHtml = hasDiscount
-    ? `<span style="font-weight:800;color:${COLORS.accent};font-size:13.5px;">${money(p.price)}</span>
-       <div style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-top:1px;">${money(p.originalPrice)}</div>`
-    : `<span style="font-weight:800;color:${COLORS.ink};font-size:13.5px;">${money(p.price)}</span>`;
+    ? `<span style="font-weight:800;color:${COLORS.accent};font-size:14px;">${money(p.price)}</span>
+       <div style="text-decoration:line-through;color:${COLORS.muted};font-size:11.5px;margin-top:1px;">${money(p.originalPrice)}</div>`
+    : `<span style="font-weight:800;color:${COLORS.ink};font-size:14px;">${money(p.price)}</span>`;
 
   const discountBadge = hasDiscount
     ? `<span style="position:absolute;top:8px;left:8px;background:${COLORS.accent};color:#ffffff;font-size:10px;font-weight:800;letter-spacing:.2px;padding:3px 7px;border-radius:20px;line-height:1;">-${discountPct}%</span>`
@@ -97,24 +153,30 @@ function productCardHtml(p, campaignClickUrl) {
     ? `<span style="position:absolute;top:8px;right:8px;background:#14151a;color:#ffffff;font-size:10px;font-weight:800;padding:3px 8px;border-radius:20px;line-height:1;white-space:nowrap;">🔥 Hot</span>`
     : '';
 
+  // Explicit alt text + styled fallback text (font-size/color/family) so
+  // that when a client blocks images by default on first open, the
+  // placeholder reads as an intentional label instead of tiny blue
+  // underlined browser-default text.
+  const altStyle = `color:${COLORS.muted};font-size:11px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;`;
+
   return `
     <a href="${url}" target="_blank" class="emk-card"
        style="display:inline-block;vertical-align:top;width:150px;max-width:150px;white-space:normal;
               margin:0 10px 0 0;text-decoration:none;background:${COLORS.card};
-              border:1px solid ${COLORS.border};border-radius:14px;overflow:hidden;
+              border:1px solid ${COLORS.border};border-radius:12px;overflow:hidden;
               box-shadow:0 1px 3px rgba(16,29,49,0.07);">
       <div style="position:relative;width:100%;background:${COLORS.chip};line-height:0;">
-        <img class="emk-card-img" src="${img}" width="150" alt=""
-             style="display:block;width:100%;height:128px;object-fit:cover;background:${COLORS.chip};">
+        <img class="emk-card-img" src="${img}" width="150" alt="${name}" bgcolor="${COLORS.chip}"
+             style="display:block;width:100%;height:128px;object-fit:cover;background:${COLORS.chip};${altStyle}">
         ${discountBadge}
         ${hotBadge}
       </div>
-      <div style="padding:10px 11px 12px;">
-        <div class="emk-card-title" style="font-size:12.5px;font-weight:600;color:${COLORS.ink};
-             line-height:1.35;height:33px;overflow:hidden;margin-bottom:6px;word-break:break-word;">
+      <div style="padding:11px 12px 13px;">
+        <div class="emk-card-title" style="font-size:13px;font-weight:600;color:${COLORS.ink};
+             line-height:1.35;height:35px;overflow:hidden;margin-bottom:7px;word-break:break-word;">
           ${name}
         </div>
-        <div style="font-size:10.5px;color:${COLORS.muted};margin-bottom:8px;">🏬 ${sellerLabel}</div>
+        <div style="font-size:11px;color:${COLORS.muted};margin-bottom:9px;">🏬 ${sellerLabel}</div>
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
           <tr>
             <td valign="middle" style="text-align:left;">${priceHtml}</td>
@@ -133,11 +195,11 @@ function viewAllCardHtml(viewAllUrl) {
   if (!viewAllUrl) return '';
   return `
     <a href="${viewAllUrl}" target="_blank" class="emk-card"
-       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;height:206px;
+       style="display:inline-block;vertical-align:top;width:150px;max-width:150px;height:210px;
               white-space:normal;margin:0 10px 0 0;text-decoration:none;
-              border:1.5px dashed ${COLORS.border};border-radius:14px;
+              border:1.5px dashed ${COLORS.border};border-radius:12px;
               background:${COLORS.bg};text-align:center;">
-      <table role="presentation" width="100%" height="206" cellpadding="0" cellspacing="0">
+      <table role="presentation" width="100%" height="210" cellpadding="0" cellspacing="0">
         <tr>
           <td align="center" valign="middle" style="padding:0 14px;">
             <span style="font-size:20px;display:block;margin-bottom:8px;">→</span>
@@ -149,26 +211,39 @@ function viewAllCardHtml(viewAllUrl) {
 }
 
 // Static fixed-pixel-width fallback table for Windows desktop Outlook only
-// (rendered inside `<!--[if mso]>`). Fixed px widths so it can never stretch.
+// (rendered inside `<!--[if mso]>`). Fixed px widths so it can never
+// stretch horizontally — and each image is now rendered as a VML
+// "bulletproof image" (v:rect + v:fill type="frame"), which crops to fill
+// the box instead of squashing it, since Word's engine ignores
+// `object-fit` entirely and a plain <img width height> there WILL distort
+// any image that isn't exactly the target aspect ratio.
 function outlookFallbackGridHtml(products, campaignClickUrl) {
   if (!products || !products.length) return '';
   const capped = products.slice(0, 4);
+  const CARD_W = 260;
+  const IMG_H = 150;
 
   const cellHtmlArr = capped.map((p) => {
     const url = campaignClickUrl
       ? `${campaignClickUrl}?redirect=${encodeURIComponent(`${FRONTEND_URL}/product-detail.html?id=${p.id}`)}`
       : `${FRONTEND_URL}/product-detail.html?id=${p.id}`;
     const img = p.image || NO_IMAGE_FALLBACK;
+    const name = (p.name || 'Product').toString();
     const priceHtml = p.originalPrice && Number(p.originalPrice) > Number(p.price)
       ? `<span style="font-weight:800;color:${COLORS.accent};">${money(p.price)}</span>
          <span style="text-decoration:line-through;color:${COLORS.muted};font-size:11px;margin-left:6px;">${money(p.originalPrice)}</span>`
       : `<span style="font-weight:800;color:${COLORS.ink};">${money(p.price)}</span>`;
+
     return `
-      <td width="260" valign="top" style="padding:8px;">
+      <td width="${CARD_W}" valign="top" style="padding:8px;">
         <a href="${url}" target="_blank" style="text-decoration:none;display:block;border:1px solid ${COLORS.border};border-radius:12px;overflow:hidden;background:${COLORS.card};">
-          <img src="${img}" width="260" height="150" alt="" style="display:block;width:260px;height:150px;object-fit:cover;background:${COLORS.chip};">
+          <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false"
+                  style="width:${CARD_W}px;height:${IMG_H}px;display:block;">
+            <v:fill type="frame" src="${img}" color="${COLORS.chip}" />
+            <w:anchorlock/>
+          </v:rect>
           <div style="padding:12px 14px;">
-            <div style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;">${(p.name || 'Product').toString()}</div>
+            <div style="font-size:13px;font-weight:600;color:${COLORS.ink};line-height:1.4;margin-bottom:6px;">${name}</div>
             <div style="font-size:14px;">${priceHtml}</div>
           </div>
         </a>
@@ -177,10 +252,10 @@ function outlookFallbackGridHtml(products, campaignClickUrl) {
 
   let rowsHtml = '';
   for (let i = 0; i < cellHtmlArr.length; i += 2) {
-    rowsHtml += `<tr>${cellHtmlArr[i]}${cellHtmlArr[i + 1] || '<td width="260"></td>'}</tr>`;
+    rowsHtml += `<tr>${cellHtmlArr[i]}${cellHtmlArr[i + 1] || `<td width="${CARD_W}"></td>`}</tr>`;
   }
 
-  return `<table role="presentation" width="536" cellpadding="0" cellspacing="0" align="center">${rowsHtml}</table>`;
+  return `<table role="presentation" width="${CARD_W * 2 + 32}" cellpadding="0" cellspacing="0" align="center">${rowsHtml}</table>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +273,7 @@ function productGridHtml(products, campaignClickUrl, viewAllUrl) {
     <![endif]-->
     <!--[if !mso]><!-->
     <div class="emk-scroll" style="overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
-         white-space:nowrap;scroll-snap-type:x proximity;padding:4px 2px 14px;margin:0 -2px 4px;">
+         white-space:nowrap;scroll-snap-type:x proximity;padding:6px 0 16px;margin:0 0 4px;">
       ${cardsHtml}${trailingCard}
     </div>
     <!--<![endif]-->`;
@@ -242,14 +317,14 @@ function promotionalCampaignTemplate({
       ? 'Recommended for you'
       : 'You might also like';
     bodyHtml += `
-      <h3 class="emk-section-title" style="margin:24px 0 10px;font-size:15px;color:${COLORS.ink};">
+      <h3 class="emk-section-title" style="margin:26px 0 12px;font-size:15px;font-weight:700;color:${COLORS.ink};">
         🔥 ${sectionLabel}
       </h3>
       ${gridHtml}`;
   }
 
   const heroHtml = campaign.heroImageUrl
-    ? `<img class="emk-hero-img" src="${campaign.heroImageUrl}" alt="" style="width:100%;max-width:100%;height:auto;max-height:320px;object-fit:cover;border-radius:12px;display:block;margin-bottom:18px;">`
+    ? `<img class="emk-hero-img" src="${campaign.heroImageUrl}" alt="" style="width:100%;max-width:100%;height:auto;max-height:240px;object-fit:cover;border-radius:12px;display:block;margin-bottom:20px;background:${COLORS.chip};">`
     : '';
 
   const ctaHtml = campaign.ctaUrl
@@ -263,22 +338,28 @@ function promotionalCampaignTemplate({
     ? `<img src="${openPixelUrl}" width="1" height="1" alt="" style="display:block;border:0;width:1px;height:1px;">`
     : '';
 
+  // Note: no <style> tag here anymore — marketingStyleSheet() gets spliced
+  // into <head> below, after baseLayout() builds the full document.
   const bodyWithExtras = `
-    ${emkResponsiveStyleBlock()}
     ${heroHtml}
-    <div class="emk-body-text" style="font-size:14px;line-height:1.7;color:${COLORS.ink};white-space:pre-wrap;word-break:break-word;">${bodyHtml}</div>
+    <div class="emk-body-text" style="font-size:15px;line-height:1.7;color:${COLORS.ink};white-space:pre-wrap;word-break:break-word;">${bodyHtml}</div>
     ${ctaHtml}
     ${unsubscribeFooterHtml(unsubscribeUrl)}
     ${pixelHtml}
   `;
 
-  return baseLayout({
+  const rawHtml = baseLayout({
     preheader: campaign.previewText || campaign.subject,
     eyebrow: campaign.fromName || 'Six Star Suppliers',
     title: campaign.subject,
     intro: '',
     bodyHtml: bodyWithExtras,
   });
+
+  // This is the actual mobile fix: splice our responsive rules into
+  // <head> instead of leaving them inside the body, where many mobile
+  // clients strip them.
+  return injectStyleIntoHead(rawHtml, marketingStyleSheet());
 }
 
 // Small standalone confirmation page shown right after clicking Unsubscribe
