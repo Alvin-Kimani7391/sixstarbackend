@@ -1,16 +1,23 @@
 // ============================================================
 // Shop theme contract — the single source of truth for what a
-// seller's `themeConfiguration` blob can contain. The customizer UI
-// (seller dashboard) writes into this shape; shop-detail.js renders
-// from it. Both sides must stay in sync with this file.
-//
-// mergeWithDefaults() guarantees the renderer NEVER has to guess —
-// every key is always present, even for shops that saved {} or an
-// older/partial theme before new keys were added here.
-//
-// sanitizeIncomingTheme() is the write-side guard: caps array sizes
-// and string lengths so a seller can't save an unbounded JSON blob.
+// seller's `themeConfiguration` blob can contain.
 // ============================================================
+
+const SOCIAL_PLATFORM_META = {
+  facebook: 'Facebook',
+  instagram: 'Instagram',
+  tiktok: 'TikTok',
+  whatsapp: 'WhatsApp',
+  twitter: 'X (Twitter)',
+  youtube: 'YouTube',
+  linkedin: 'LinkedIn',
+  pinterest: 'Pinterest',
+  telegram: 'Telegram',
+  snapchat: 'Snapchat',
+  threads: 'Threads',
+  website: 'Website / other',
+};
+const SOCIAL_PLATFORMS = Object.keys(SOCIAL_PLATFORM_META);
 
 const DEFAULT_THEME = {
   colors: {
@@ -30,6 +37,10 @@ const DEFAULT_THEME = {
     sticky: true,
     showSearch: true,
     showCategoryNav: true,
+    // NEW — text shown right after the logo, fully styleable
+    tagline: '',
+    taglineColor: '#7a7268',
+    taglineSize: 'medium', // 'small' | 'medium' | 'large'
     announcementBar: {
       enabled: false,
       text: '',
@@ -40,12 +51,22 @@ const DEFAULT_THEME = {
   hero: {
     type: 'banner', // 'banner' | 'slideshow' | 'none'
     slides: [
-      { image: '', heading: '', subheading: '', buttonText: '', buttonLink: '' },
+      {
+        image: '', heading: '', subheading: '', buttonText: '', buttonLink: '',
+        // NEW — per-slide text placement + styling
+        contentAlign: 'left',       // 'left' | 'center' | 'right'
+        contentPosition: 'middle',  // 'top' | 'middle' | 'bottom'
+        headingColor: '#ffffff',
+        subheadingColor: '#ffffff',
+        buttonBgColor: '#f2a93b',
+        buttonTextColor: '#16324f',
+        headingSize: 'large',       // 'small' | 'medium' | 'large'
+      },
     ],
   },
   productGrid: {
     columns: 3, // 2 | 3 | 4
-    cardStyle: 'shadow', // 'minimal' | 'bordered' | 'shadow'
+    cardStyle: 'shadow',
     showRating: true,
     showStockBadge: true,
   },
@@ -57,9 +78,12 @@ const DEFAULT_THEME = {
     style: 'simple', // 'simple' | 'expanded'
     columns: [],
     showSocial: false,
-    socialLinks: { facebook: '', instagram: '', tiktok: '', whatsapp: '' },
+    // CHANGED — now a free list, any platform, any count (was a fixed object)
+    socialLinks: [],
     showPaymentNote: true,
     copyrightText: '',
+    // NEW — where the copyright line sits
+    copyrightAlign: 'center', // 'left' | 'center' | 'right'
   },
 };
 
@@ -71,31 +95,52 @@ const LIMITS = {
   maxStringLen: 300,
   maxRichTextLen: 4000,
   maxProductIdsPerSection: 40,
+  maxSocialLinks: 10,
 };
 
 function clampStr(val, max = LIMITS.maxStringLen) {
   if (typeof val !== 'string') return '';
   return val.slice(0, max);
 }
-
 function clampBool(val, fallback) {
   return typeof val === 'boolean' ? val : fallback;
 }
-
 function clampHex(val, fallback) {
   if (typeof val === 'string' && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(val.trim())) {
     return val.trim();
   }
   return fallback;
 }
-
 function clampEnum(val, allowed, fallback) {
   return allowed.includes(val) ? val : fallback;
 }
 
+// Accepts either the NEW array shape ([{platform,url,label}]) or the OLD
+// fixed-object shape ({facebook,instagram,tiktok,whatsapp}) and always
+// returns the new array shape. Used on both the read path (mergeWithDefaults)
+// and the write path (sanitizeIncomingTheme), so legacy shops migrate
+// transparently the moment they're next viewed or saved.
+function normalizeSocialLinks(raw) {
+  if (Array.isArray(raw)) {
+    return raw
+      .filter((l) => l && typeof l === 'object' && l.url)
+      .slice(0, LIMITS.maxSocialLinks)
+      .map((l) => ({
+        platform: SOCIAL_PLATFORMS.includes(l.platform) ? l.platform : 'website',
+        url: clampStr(l.url, 300),
+        label: clampStr(l.label, 40),
+      }));
+  }
+  if (raw && typeof raw === 'object') {
+    return Object.entries(raw)
+      .filter(([k, v]) => SOCIAL_PLATFORMS.includes(k) && v)
+      .map(([platform, url]) => ({ platform, url: clampStr(url, 300), label: '' }));
+  }
+  return [];
+}
+
 // ---------------------------------------------------------------
-// mergeWithDefaults — READ path. Always returns a fully-populated,
-// renderer-safe object regardless of what was actually saved.
+// mergeWithDefaults — READ path.
 // ---------------------------------------------------------------
 function mergeWithDefaults(saved = {}) {
   saved = saved && typeof saved === 'object' ? saved : {};
@@ -112,12 +157,13 @@ function mergeWithDefaults(saved = {}) {
     },
   };
 
+  const defaultSlide = DEFAULT_THEME.hero.slides[0];
   const hero = {
     ...DEFAULT_THEME.hero,
     ...(saved.hero || {}),
     slides:
       Array.isArray(saved.hero?.slides) && saved.hero.slides.length
-        ? saved.hero.slides.slice(0, LIMITS.maxSlides)
+        ? saved.hero.slides.slice(0, LIMITS.maxSlides).map((s) => ({ ...defaultSlide, ...(s || {}) }))
         : DEFAULT_THEME.hero.slides,
   };
 
@@ -132,17 +178,15 @@ function mergeWithDefaults(saved = {}) {
     ...DEFAULT_THEME.footer,
     ...(saved.footer || {}),
     columns: Array.isArray(saved.footer?.columns) ? saved.footer.columns.slice(0, LIMITS.maxFooterColumns) : [],
-    socialLinks: { ...DEFAULT_THEME.footer.socialLinks, ...(saved.footer?.socialLinks || {}) },
+    socialLinks: normalizeSocialLinks(saved.footer?.socialLinks),
+    copyrightAlign: clampEnum(saved.footer?.copyrightAlign, ['left', 'center', 'right'], 'center'),
   };
 
   return { colors, fonts, header, hero, productGrid, sections, footer };
 }
 
 // ---------------------------------------------------------------
-// sanitizeIncomingTheme — WRITE path. Takes whatever the seller's
-// customizer sent (already parsed from JSON) and returns a clean,
-// size-capped object safe to persist. Never throws — just drops/
-// truncates anything malformed instead of rejecting the whole save.
+// sanitizeIncomingTheme — WRITE path.
 // ---------------------------------------------------------------
 function sanitizeIncomingTheme(raw) {
   if (!raw || typeof raw !== 'object') return {};
@@ -171,6 +215,9 @@ function sanitizeIncomingTheme(raw) {
       sticky: clampBool(raw.header.sticky, DEFAULT_THEME.header.sticky),
       showSearch: clampBool(raw.header.showSearch, DEFAULT_THEME.header.showSearch),
       showCategoryNav: clampBool(raw.header.showCategoryNav, DEFAULT_THEME.header.showCategoryNav),
+      tagline: clampStr(raw.header.tagline, 80),
+      taglineColor: clampHex(raw.header.taglineColor, DEFAULT_THEME.header.taglineColor),
+      taglineSize: clampEnum(raw.header.taglineSize, ['small', 'medium', 'large'], DEFAULT_THEME.header.taglineSize),
       announcementBar: {
         enabled: clampBool(raw.header.announcementBar?.enabled, false),
         text: clampStr(raw.header.announcementBar?.text),
@@ -182,6 +229,7 @@ function sanitizeIncomingTheme(raw) {
 
   if (raw.hero && typeof raw.hero === 'object') {
     const slides = Array.isArray(raw.hero.slides) ? raw.hero.slides.slice(0, LIMITS.maxSlides) : [];
+    const defaultSlide = DEFAULT_THEME.hero.slides[0];
     out.hero = {
       type: clampEnum(raw.hero.type, ['banner', 'slideshow', 'none'], DEFAULT_THEME.hero.type),
       slides: slides.map((s) => ({
@@ -190,6 +238,13 @@ function sanitizeIncomingTheme(raw) {
         subheading: clampStr(s?.subheading),
         buttonText: clampStr(s?.buttonText, 60),
         buttonLink: clampStr(s?.buttonLink, 500),
+        contentAlign: clampEnum(s?.contentAlign, ['left', 'center', 'right'], defaultSlide.contentAlign),
+        contentPosition: clampEnum(s?.contentPosition, ['top', 'middle', 'bottom'], defaultSlide.contentPosition),
+        headingColor: clampHex(s?.headingColor, defaultSlide.headingColor),
+        subheadingColor: clampHex(s?.subheadingColor, defaultSlide.subheadingColor),
+        buttonBgColor: clampHex(s?.buttonBgColor, defaultSlide.buttonBgColor),
+        buttonTextColor: clampHex(s?.buttonTextColor, defaultSlide.buttonTextColor),
+        headingSize: clampEnum(s?.headingSize, ['small', 'medium', 'large'], defaultSlide.headingSize),
       })),
     };
   }
@@ -230,18 +285,14 @@ function sanitizeIncomingTheme(raw) {
           : [],
       })),
       showSocial: clampBool(raw.footer.showSocial, false),
-      socialLinks: {
-        facebook: clampStr(raw.footer.socialLinks?.facebook, 300),
-        instagram: clampStr(raw.footer.socialLinks?.instagram, 300),
-        tiktok: clampStr(raw.footer.socialLinks?.tiktok, 300),
-        whatsapp: clampStr(raw.footer.socialLinks?.whatsapp, 300),
-      },
+      socialLinks: normalizeSocialLinks(raw.footer.socialLinks),
       showPaymentNote: clampBool(raw.footer.showPaymentNote, true),
       copyrightText: clampStr(raw.footer.copyrightText, 200),
+      copyrightAlign: clampEnum(raw.footer.copyrightAlign, ['left', 'center', 'right'], DEFAULT_THEME.footer.copyrightAlign),
     };
   }
 
   return out;
 }
 
-module.exports = { DEFAULT_THEME, mergeWithDefaults, sanitizeIncomingTheme };
+module.exports = { DEFAULT_THEME, SOCIAL_PLATFORM_META, mergeWithDefaults, sanitizeIncomingTheme };
