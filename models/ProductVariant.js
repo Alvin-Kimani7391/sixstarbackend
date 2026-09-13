@@ -22,6 +22,24 @@ const productVariantSchema = new Schema(
     },
     stock: { type: Number, required: true, min: 0, default: 0 },
     priceAdjustment: { type: Number, default: 0 }, // added to (or subtracted from) the product's finalPrice
+
+    // ============================================================
+    // NEW — SPECIAL / CUSTOM VARIANT PRICING
+    // Lets a seller give ONE specific variant combination its own fixed
+    // selling price, completely independent of the product's base price
+    // and independent of priceAdjustment. Useful when the admin's
+    // attribute/price model doesn't anticipate a particular combination
+    // that's specific to just this product (e.g. one oddball size that
+    // costs meaningfully more/less than the rest).
+    //
+    // When useCustomPrice is true, the storefront (product-detail.js)
+    // uses customPrice directly as the displayed/purchased price for that
+    // variant and ignores priceAdjustment entirely. priceAdjustment is
+    // always stored as 0 in that case (see productController.js).
+    // ============================================================
+    useCustomPrice: { type: Boolean, default: false },
+    customPrice: { type: Number, default: null, min: 0 },
+
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }

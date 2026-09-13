@@ -37,11 +37,8 @@ const resolveCategoryCommissionRate = async (categoryIdOrDoc) => {
 };
 
 // ---------------------------------------------------------------------------
-// SHIPPING CLASSIFICATION (NEW) — 'normal' (weight-based) vs 'special'
+// SHIPPING CLASSIFICATION — 'normal' (weight-based) vs 'special'
 // (criteria-based). Same ancestor-inheritance walk as commission, above.
-// Platform default is always 'normal' — every category ships as a normal,
-// weight-priced item unless an admin explicitly specializes it or one of
-// its ancestors.
 // ---------------------------------------------------------------------------
 const resolveCategoryShippingType = async (categoryIdOrDoc) => {
   let current =
@@ -67,9 +64,6 @@ const resolveCategoryShippingType = async (categoryIdOrDoc) => {
   return { shippingType: 'normal', source: 'default', sourceName: 'Platform default' };
 };
 
-// Parses/validates a raw shippingType value coming from the request body.
-// Accepts: undefined (leave alone), '' / 'null' (clear -> inherit), or
-// exactly 'normal' / 'special'.
 const parseShippingTypeInput = (raw) => {
   if (raw === '' || raw === 'null' || raw === null) return null;
   if (!['normal', 'special'].includes(raw)) {
@@ -253,9 +247,6 @@ const updateCategory = asyncHandler(async (req, res) => {
   if (req.file) category.image = req.file.path;
   if (req.body.isActive !== undefined) category.isActive = req.body.isActive;
 
-  // Marketplace commission — applied here so it's picked up regardless of
-  // whether this request also happens to move the category under a new
-  // parent (that branch returns early further down).
   if (req.body.commissionRate !== undefined) {
     try {
       category.commissionRate = parseCommissionRateInput(req.body.commissionRate);
@@ -265,8 +256,6 @@ const updateCategory = asyncHandler(async (req, res) => {
     }
   }
 
-  // Shipping classification — same "apply before the early-return move
-  // branch" treatment as commission above.
   if (req.body.shippingType !== undefined) {
     try {
       category.shippingType = parseShippingTypeInput(req.body.shippingType);
@@ -370,11 +359,7 @@ const getCategoryCommission = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Resolve the EFFECTIVE shipping classification for a category —
-//          its own setting if set, otherwise inherited from the nearest
-//          ancestor, otherwise 'normal'. Powers the seller product wizard's
-//          weight-field vs shipping-criteria-picker branch, and the admin
-//          category form's live preview.
+// @desc    Resolve the EFFECTIVE shipping classification for a category.
 // @route   GET /api/categories/:id/shipping
 // @access  Public
 const getCategoryShippingType = asyncHandler(async (req, res) => {
@@ -393,6 +378,76 @@ const getCategoryShippingType = asyncHandler(async (req, res) => {
   });
 });
 
+// ============================================================
+// NEW — MARKETPLACE COMMISSION OVERVIEW (whole tree, resolved)
+// ============================================================
+// @desc    Get the full active category tree (Parent Category -> Category ->
+//          Sub Category) with the LIVE, resolved effective commission rate
+//          pre-computed on every node (own rate / inherited from an
+//          ancestor / platform default). One call instead of one
+//          GET /:id/commission per category — powers the seller
+//          dashboard's "Marketplace Commission" chart + table, which is
+//          meant to always reflect whatever the admin has set right now.
+// @route   GET /api/categories/commission-overview
+// @access  Private (wholesaler, retailer, admin)
+const getCommissionOverview = asyncHandler(async (req, res) => {
+  const categories = await Category.find({ isActive: true }).sort('name').lean();
+
+  const byId = {};
+  categories.forEach((c) => {
+    c.children = [];
+    byId[String(c._id)] = c;
+  });
+
+  const roots = [];
+  categories.forEach((c) => {
+    if (c.parentCategory && byId[String(c.parentCategory)]) {
+      byId[String(c.parentCategory)].children.push(c);
+    } else if (!c.parentCategory) {
+      roots.push(c);
+    }
+  });
+
+  const defaultRate = getDefaultCommissionRate();
+
+  function resolve(node, parentResolved) {
+    let effectiveRate;
+    let inherited;
+    let source;
+    let sourceName;
+
+    if (node.commissionRate !== null && node.commissionRate !== undefined) {
+      effectiveRate = node.commissionRate;
+      inherited = false;
+      source = String(node._id);
+      sourceName = node.name;
+    } else if (parentResolved) {
+      effectiveRate = parentResolved.effectiveRate;
+      inherited = true;
+      source = parentResolved.source;
+      sourceName = parentResolved.sourceName;
+    } else {
+      effectiveRate = defaultRate;
+      inherited = true;
+      source = 'default';
+      sourceName = 'Platform default';
+    }
+
+    node.effectiveCommissionRate = effectiveRate;
+    node.commissionInherited = inherited;
+    node.commissionSource = source;
+    node.commissionSourceName = sourceName;
+
+    const resolvedForChildren = { effectiveRate, source, sourceName };
+    node.children = (node.children || []).map((child) => resolve(child, resolvedForChildren));
+    return node;
+  }
+
+  const resolvedTree = roots.map((r) => resolve(r, null));
+
+  res.json({ success: true, tree: resolvedTree, defaultRate });
+});
+
 module.exports = {
   getCategories,
   getAllCategoriesAdmin,
@@ -403,6 +458,7 @@ module.exports = {
   deleteCategory,
   getCategoryCommission,
   getCategoryShippingType,
+  getCommissionOverview, // NEW
   resolveCategoryCommissionRate, // used by orderController.js
   resolveCategoryShippingType,   // used by productController.js + shippingFeeCalculator.js
   getDefaultCommissionRate,

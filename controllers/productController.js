@@ -101,6 +101,11 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
           err.status = 400;
           throw err;
         }
+        // NOTE: deliberately NOT validated against def.options — a seller is
+        // allowed to type a custom value here (see the "+ Custom value" UI
+        // in the seller dashboard) for combinations the admin's attribute
+        // option list doesn't cover yet, since those can be specific to one
+        // particular product.
         return { attribute: def._id, value: String(match.value) };
       });
 
@@ -123,11 +128,35 @@ async function validateAndPrepareAttributes(categoryId, rawAttributes, rawVarian
         throw err;
       }
 
+      // ============================================================
+      // NEW — SPECIAL / CUSTOM VARIANT PRICING
+      // A seller can flag a specific variant combination as having its own
+      // fixed selling price (useCustomPrice + customPrice), instead of the
+      // normal priceAdjustment (added/subtracted from the product's base
+      // price). Useful when one specific variant (e.g. a particular size or
+      // color the admin's attribute list didn't anticipate) needs its own
+      // price entirely, independent of the product's base price. When
+      // useCustomPrice is true, priceAdjustment is ignored/zeroed — the
+      // storefront always uses customPrice directly for that variant.
+      // ============================================================
+      const useCustomPrice = v.useCustomPrice === true || v.useCustomPrice === 'true';
+      let customPrice = null;
+      if (useCustomPrice) {
+        customPrice = Number(v.customPrice);
+        if (Number.isNaN(customPrice) || customPrice < 0) {
+          const err = new Error('Please provide a valid custom price for this variant');
+          err.status = 400;
+          throw err;
+        }
+      }
+
       return {
         combination,
         stock: variantStock,
-        priceAdjustment: Number(v.priceAdjustment) || 0,
+        priceAdjustment: useCustomPrice ? 0 : (Number(v.priceAdjustment) || 0),
         sku: v.sku || '',
+        useCustomPrice,
+        customPrice,
       };
     });
 
@@ -268,25 +297,6 @@ function validateAndPrepareWholesaleFields(role, body) {
   return { deliveryType, minOrderQuantity, pricingTiers, freeDelivery, deliveryCharge };
 }
 
-// ============================================================
-// NEW — DYNAMIC SHIPPING VALIDATION
-// ------------------------------------------------------------
-// Resolves the category's EFFECTIVE shipping classification (live,
-// inheritance-aware — see resolveCategoryShippingType) and validates/
-// prepares whichever of the two shipping field sets applies:
-//   'normal'  -> weightKg (required, > 0)
-//   'special' -> shippingCriteriaSelections, validated against the
-//                category's actual ShippingCriteria groups (one
-//                selection per required group; must reference a real,
-//                active option)
-//
-// A wholesaler product with deliveryType 'heavy' still gets a
-// shippingType/weightKg recorded (for consistency/reporting), but it is
-// never actually required, since heavy-wholesale items are excluded from
-// the dynamic shipping calculation entirely (see shippingFeeCalculator.js).
-// We still validate normally here so that if a seller later flips their
-// product to 'simple' delivery, the shipping data is already correct.
-// ============================================================
 async function validateAndPrepareShipping(categoryId, body) {
   const { shippingType } = await resolveCategoryShippingType(categoryId);
 
@@ -411,7 +421,6 @@ const createProduct = asyncHandler(async (req, res) => {
     throw err;
   }
 
-  // NEW — dynamic shipping validation (weight vs criteria, resolved live from category)
   let shipping;
   try {
     shipping = await validateAndPrepareShipping(category, req.body);
@@ -452,7 +461,6 @@ const createProduct = asyncHandler(async (req, res) => {
     pricingTiers: wholesale.pricingTiers,
     freeDelivery: wholesale.freeDelivery,
     deliveryCharge: wholesale.deliveryCharge,
-    // NEW — dynamic shipping
     shippingType: shipping.shippingType,
     weightKg: shipping.weightKg,
     shippingCriteriaSelections: shipping.shippingCriteriaSelections,
@@ -577,9 +585,6 @@ const updateProduct = asyncHandler(async (req, res) => {
     product.deliveryCharge = wholesale.deliveryCharge;
   }
 
-  // NEW — dynamic shipping revalidation. Re-run whenever the category
-  // changed (classification may now differ) OR the seller explicitly sent
-  // new shipping fields (weightKg / shippingCriteriaSelections).
   const shippingKeysSent =
     categoryChanged || req.body.weightKg !== undefined || req.body.shippingCriteriaSelections !== undefined;
   if (shippingKeysSent) {
