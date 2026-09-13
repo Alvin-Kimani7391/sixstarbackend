@@ -4,6 +4,7 @@ const {
   createShop,
   getMyShop,
   updateMyShop,
+  uploadShopThemeImage,
   getPendingShops,
   approveShop,
   rejectShop,
@@ -20,24 +21,29 @@ const {
 } = require('../controllers/shopController');
 const { createShopReview, getShopReviews } = require('../controllers/shopReviewController');
 const { protect, authorize } = require('../middleware/authMiddleware');
-const { uploadShopImages } = require('../middleware/uploadMiddleware');
+const { uploadShopImages, uploadThemeImage } = require('../middleware/uploadMiddleware');
 
 // ---------------- Seller ----------------
-// uploadShopImages parses multipart/form-data (logo + banner files, up to one
-// each) and streams them straight to Cloudinary via the shop storage config.
-// If the request isn't multipart (e.g. the Settings tab's plain JSON PUT),
-// multer just passes through without touching req.body/req.files.
 router.post('/', protect, authorize('wholesaler', 'retailer'), uploadShopImages, createShop);
 router.get('/my-shop', protect, authorize('wholesaler', 'retailer'), getMyShop);
 router.put('/my-shop', protect, authorize('wholesaler', 'retailer'), uploadShopImages, updateMyShop);
 
-// ---------------- Admin ----------------
-// Namespaced under /admin here (rather than living in adminRoutes.js) so the
-// whole Shop feature stays self-contained in one route file.
-router.get('/admin', protect, authorize('admin'), getAllShopsAdmin); // full table, any status/search
-router.get('/admin/pending', protect, authorize('admin'), getPendingShops);
+// NEW — one-off image upload for the storefront customizer (hero slides etc).
+// Must be declared before any other '/my-shop/:something' style route so it
+// isn't accidentally shadowed.
+router.post(
+  '/my-shop/theme-image',
+  protect,
+  authorize('wholesaler', 'retailer'),
+  uploadThemeImage,
+  uploadShopThemeImage
+);
 
 router.patch('/my-shop/toggle-active', protect, authorize('wholesaler', 'retailer'), toggleMyShopActive);
+
+// ---------------- Admin ----------------
+router.get('/admin', protect, authorize('admin'), getAllShopsAdmin);
+router.get('/admin/pending', protect, authorize('admin'), getPendingShops);
 
 router.patch('/admin/:id/approve', protect, authorize('admin'), approveShop);
 router.patch('/admin/:id/reject', protect, authorize('admin'), rejectShop);
@@ -52,11 +58,9 @@ router.delete('/admin/:id', protect, authorize('admin'), adminDeleteShop);
 router.get('/', getPublicShops);       // GET /api/shops
 
 // ---------------- Shop reviews ----------------
-// Grouped under :shopId (two path segments) so this never collides with the
-// single-segment :slug route below, regardless of declaration order.
 router.post('/:shopId/reviews', protect, authorize('buyer'), createShopReview);
 router.get('/:shopId/reviews', getShopReviews);
 
-router.get('/:slug', getShopBySlug);   // GET /api/shops/:slug
+router.get('/:slug', getShopBySlug);   // GET /api/shops/:slug — keep LAST
 
 module.exports = router;

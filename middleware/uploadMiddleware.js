@@ -50,6 +50,31 @@ const uploadShopImages = uploadShop.fields([
 ]);
 
 // ---------------------------------------------------------------------------
+// NEW: Shop THEME images — free-form images the storefront customizer needs
+// to upload one at a time (hero slide backgrounds, rich-text illustrations,
+// future section art, etc). These don't map to a fixed field name the way
+// logo/banner do, since the customizer can have any number of hero slides —
+// so this is a single generic "image" field, called once per upload, and the
+// controller just hands back the resulting Cloudinary URL for the frontend
+// to stash wherever it needs to in themeConfiguration.
+// ---------------------------------------------------------------------------
+const themeImageStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'ivh-marketplace/shop-theme',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 2000, height: 2000, crop: 'limit' }],
+  },
+});
+
+const uploadThemeImageMulter = multer({
+  storage: themeImageStorage,
+  limits: { fileSize: 6 * 1024 * 1024 }, // 6MB — hero banners can be large
+});
+
+const uploadThemeImage = uploadThemeImageMulter.single('image');
+
+// ---------------------------------------------------------------------------
 // Seller verification docs: separate folder, PDFs allowed (registration certs,
 // CR12 etc. are often scanned as PDF), several optional single-file fields.
 //
@@ -93,14 +118,6 @@ const uploadVerificationDocs = uploadVerification.fields([
 
 // ---------------------------------------------------------------------------
 // Legal documents (Terms, Seller Agreement, policies): PDF only.
-//
-// FIX: this previously used `resource_type: 'raw'`, which is what was
-// breaking document viewing. Raw delivery on Cloudinary doesn't reliably
-// carry the .pdf extension or a correct Content-Type through to the final
-// URL, so browsers either failed to render it inline or downloaded a file
-// with no extension. Switching to 'auto' lets Cloudinary treat the PDF as
-// image-deliverable content (same as verificationStorage above), which
-// preserves the extension/content-type and opens correctly in a new tab.
 // ---------------------------------------------------------------------------
 const legalDocStorage = new CloudinaryStorage({
   cloudinary,
@@ -119,9 +136,7 @@ const uploadLegalDoc = multer({
 const uploadLegalDocument = uploadLegalDoc.single('file');
 
 // ---------------------------------------------------------------------------
-// RFQ product photo: ONE image, attached when a buyer creates a Request for
-// Quote (report section 2 — "product image"). Separate folder so these
-// don't mix with actual marketplace product photos.
+// RFQ product photo
 // ---------------------------------------------------------------------------
 const rfqStorage = new CloudinaryStorage({
   cloudinary,
@@ -140,9 +155,7 @@ const uploadRFQ = multer({
 const uploadRFQImage = uploadRFQ.single('productImage');
 
 // ---------------------------------------------------------------------------
-// RFQ chat image attachments: sent inline in the private buyer<->seller
-// conversation on an RFQ. Kept smaller (3MB) and in its own folder since
-// these are casual in-chat photos, not storefront-quality product shots.
+// RFQ chat image attachments
 // ---------------------------------------------------------------------------
 const rfqChatStorage = new CloudinaryStorage({
   cloudinary,
@@ -160,9 +173,8 @@ const uploadRFQChat = multer({
 
 const uploadRFQChatImage = uploadRFQChat.single('image');
 
-
 // ---------------------------------------------------------------------------
-// Agent profile photos: separate Cloudinary folder, single image field.
+// Agent profile photos
 // ---------------------------------------------------------------------------
 const agentStorage = new CloudinaryStorage({
   cloudinary,
@@ -181,10 +193,7 @@ const uploadAgent = multer({
 const uploadAgentAvatar = uploadAgent.single('avatar');
 
 // ---------------------------------------------------------------------------
-// Marketing Center assets (images/banners/videos/flyers/PDFs) — one combined
-// Cloudinary folder, resource_type 'auto' so images/PDFs/videos all upload
-// through the same field without the seller-verification "raw delivery"
-// bug (see verificationStorage's comment above for why 'auto' matters).
+// Marketing Center assets
 // ---------------------------------------------------------------------------
 const marketingStorage = new CloudinaryStorage({
   cloudinary,
@@ -205,7 +214,7 @@ const uploadMarketingAsset = uploadMarketing.fields([
   { name: 'thumbnail', maxCount: 1 },
 ]);
 
-// Brand Kit logo/altLogo — small image uploads, own folder.
+// Brand Kit logo/altLogo
 const brandStorage = new CloudinaryStorage({
   cloudinary,
   params: {
@@ -229,6 +238,7 @@ module.exports = {
   uploadProductImages,
   uploadSingleImage,
   uploadShopImages,
+  uploadThemeImage, // NEW
   uploadVerificationDocs,
   uploadLegalDocument,
   uploadRFQImage,

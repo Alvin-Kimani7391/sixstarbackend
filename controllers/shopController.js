@@ -81,10 +81,6 @@ function sendShopSubmissionEmails({ sellerName, sellerEmail, shop }) {
 // ---------------------------------------------------------------------------
 
 // @desc    Seller creates their (single, optional) shop. Starts pending_approval.
-//          Logo/banner are optional file uploads (multipart/form-data, field
-//          names "logo" and "banner") handled by uploadShopImages and streamed
-//          to Cloudinary — req.files.logo[0].path / req.files.banner[0].path
-//          are already the final Cloudinary URLs by the time this runs.
 // @route   POST /api/shops
 // @access  Private (wholesaler, retailer)
 const createShop = asyncHandler(async (req, res) => {
@@ -131,7 +127,6 @@ const createShop = asyncHandler(async (req, res) => {
   sendShopSubmissionEmails({ sellerName: req.user.name, sellerEmail: req.user.email, shop });
 });
 
-
 const toggleMyShopActive = asyncHandler(async (req, res) => {
   const shop = await Shop.findOne({ seller: req.user._id });
   if (!shop) {
@@ -154,31 +149,13 @@ const getMyShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findOne({ seller: req.user._id });
   if (!shop) return res.json({ success: true, shop: null });
 
-  // The seller's own dashboard always sees the fully merged theme (with
-  // defaults filled in) regardless of customizationMode, so the customizer
-  // UI always has a complete object to edit — even on a shop that's never
-  // touched a theme field before.
   const shopObj = shop.toObject();
   shopObj.themeConfiguration = mergeWithDefaults(shopObj.themeConfiguration);
 
   res.json({ success: true, shop: shopObj });
 });
 
-// @desc    Seller updates their own shop's basic info. Any update on an already
-//          approved shop sends it back to pending_approval, mirroring the
-//          product edit-while-live behavior — and, same as a fresh shop
-//          submission, fires the seller receipt + admin review-needed emails
-//          again so the re-review doesn't sit silently.
-//          Logo/banner: only replaced if a new file was actually uploaded in
-//          this request (req.files.logo / req.files.banner) — otherwise the
-//          existing Cloudinary URLs on the shop are left untouched, so the
-//          seller isn't forced to re-upload branding on every edit.
-//
-//          NOTE: changing customizationMode or themeConfiguration alone
-//          (i.e. the Customize tab) does NOT send an approved shop back to
-//          review — only shopName/description/businessCategory/businessHours/
-//          logo/banner changes trigger that, exactly as before this feature.
-//          Storefront design changes are the seller's own to publish freely.
+// @desc    Seller updates their own shop's basic info.
 // @route   PUT /api/shops/my-shop
 // @access  Private (wholesaler, retailer)
 const updateMyShop = asyncHandler(async (req, res) => {
@@ -211,8 +188,6 @@ const updateMyShop = asyncHandler(async (req, res) => {
     shop.themeConfiguration = parseThemeConfiguration(req.body.themeConfiguration, shop.themeConfiguration);
   }
 
-  // req.files comes from uploadShopImages (multer .fields), so each key is an
-  // array — only overwrite logo/banner when a new file actually came through.
   if (req.files?.logo?.[0]) {
     shop.logo = req.files.logo[0].path;
     reviewTriggeringChange = true;
@@ -235,7 +210,6 @@ const updateMyShop = asyncHandler(async (req, res) => {
     shop.status = 'pending_approval';
     shop.reviewedBy = null;
     shop.reviewedAt = null;
-    // A shop pulled back for re-review shouldn't keep spotlighting stale content.
     shop.isFeatured = false;
   }
 
@@ -245,22 +219,38 @@ const updateMyShop = asyncHandler(async (req, res) => {
   shopObj.themeConfiguration = mergeWithDefaults(shopObj.themeConfiguration);
   res.json({ success: true, shop: shopObj });
 
-  // Only fire the submission emails when this edit actually pulled a
-  // previously-approved shop back into the review queue — routine
-  // design-only edits (or edits to a shop that's still pending/rejected/
-  // suspended) shouldn't spam anyone.
   if (goesBackToReview) {
     sendShopSubmissionEmails({ sellerName: req.user.name, sellerEmail: req.user.email, shop });
   }
+});
+
+// @desc    NEW — Seller uploads a single free-standing image for use inside
+//          their theme (hero slide backgrounds, section art, etc). Doesn't
+//          touch the Shop document at all — just streams the file to
+//          Cloudinary and hands back the URL, which the frontend customizer
+//          then stores wherever it needs inside themeConfiguration (e.g.
+//          hero.slides[i].image) on its own next save.
+// @route   POST /api/shops/my-shop/theme-image
+// @access  Private (wholesaler, retailer)
+const uploadShopThemeImage = asyncHandler(async (req, res) => {
+  const shop = await Shop.findOne({ seller: req.user._id }).select('_id');
+  if (!shop) {
+    res.status(404);
+    throw new Error('You do not have a shop yet — create your shop before uploading theme images.');
+  }
+
+  if (!req.file) {
+    res.status(400);
+    throw new Error('No image file was uploaded. Attach it under the "image" field.');
+  }
+
+  res.status(201).json({ success: true, url: req.file.path });
 });
 
 // ---------------------------------------------------------------------------
 // Admin
 // ---------------------------------------------------------------------------
 
-// @desc    Admin: list ALL shops (any status), filterable — the main shops table
-// @route   GET /api/shops/admin?status=pending_approval&search=name
-// @access  Private (admin)
 const getAllShopsAdmin = asyncHandler(async (req, res) => {
   const { status, search } = req.query;
   const filter = {};
@@ -275,9 +265,6 @@ const getAllShopsAdmin = asyncHandler(async (req, res) => {
   res.json({ success: true, count: shops.length, shops });
 });
 
-// @desc    Admin views all shops pending approval
-// @route   GET /api/shops/admin/pending
-// @access  Private (admin)
 const getPendingShops = asyncHandler(async (req, res) => {
   const shops = await Shop.find({ status: 'pending_approval' })
     .populate('seller', 'name email businessName shopName role')
@@ -285,9 +272,6 @@ const getPendingShops = asyncHandler(async (req, res) => {
   res.json({ success: true, count: shops.length, shops });
 });
 
-// @desc    Admin approves a shop
-// @route   PATCH /api/shops/admin/:id/approve
-// @access  Private (admin)
 const approveShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findById(req.params.id);
   if (!shop) {
@@ -319,9 +303,6 @@ const approveShop = asyncHandler(async (req, res) => {
   }
 });
 
-// @desc    Admin rejects a shop with a reason
-// @route   PATCH /api/shops/admin/:id/reject
-// @access  Private (admin)
 const rejectShop = asyncHandler(async (req, res) => {
   const { reason } = req.body;
   if (!reason) {
@@ -355,9 +336,6 @@ const rejectShop = asyncHandler(async (req, res) => {
   }
 });
 
-// @desc    Admin suspends an approved shop
-// @route   PATCH /api/shops/admin/:id/suspend
-// @access  Private (admin)
 const suspendShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findById(req.params.id);
   if (!shop) {
@@ -370,9 +348,6 @@ const suspendShop = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Shop suspended', shop });
 });
 
-// @desc    Admin reverses a suspension, putting a shop back on the storefront
-// @route   PATCH /api/shops/admin/:id/reactivate
-// @access  Private (admin)
 const reactivateShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findById(req.params.id);
   if (!shop) {
@@ -388,9 +363,6 @@ const reactivateShop = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Shop reactivated', shop });
 });
 
-// @desc    Admin toggles the "Verified" badge
-// @route   PATCH /api/shops/admin/:id/verify   { verificationStatus: 'verified' | 'unverified' }
-// @access  Private (admin)
 const setShopVerification = asyncHandler(async (req, res) => {
   const { verificationStatus } = req.body;
   if (!['verified', 'unverified'].includes(verificationStatus)) {
@@ -413,9 +385,6 @@ const setShopVerification = asyncHandler(async (req, res) => {
   res.json({ success: true, shop });
 });
 
-// @desc    Admin features/unfeatures a shop for the homepage — only approved shops
-// @route   PATCH /api/shops/admin/:id/feature   { isFeatured: true|false }
-// @access  Private (admin)
 const setShopFeatured = asyncHandler(async (req, res) => {
   const { isFeatured } = req.body;
 
@@ -434,9 +403,6 @@ const setShopFeatured = asyncHandler(async (req, res) => {
   res.json({ success: true, shop });
 });
 
-// @desc    Admin fully edits a shop's basic info, optionally replacing logo/banner
-// @route   PATCH /api/shops/admin/:id
-// @access  Private (admin)
 const adminUpdateShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findById(req.params.id);
   if (!shop) {
@@ -465,7 +431,6 @@ const adminUpdateShop = asyncHandler(async (req, res) => {
     shop.slug = await Shop.buildUniqueSlug(shop.shopName, shop._id);
   }
 
-  // req.files comes from uploadShopImages (multer .fields), so each key is an array
   if (req.files?.logo?.[0]) shop.logo = req.files.logo[0].path;
   if (req.files?.banner?.[0]) shop.banner = req.files.banner[0].path;
 
@@ -473,9 +438,6 @@ const adminUpdateShop = asyncHandler(async (req, res) => {
   res.json({ success: true, shop });
 });
 
-// @desc    Admin removes a shop entirely (soft delete — seller can create a new one)
-// @route   DELETE /api/shops/admin/:id
-// @access  Private (admin)
 const adminDeleteShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findByIdAndUpdate(
     req.params.id,
@@ -489,9 +451,6 @@ const adminDeleteShop = asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'Shop removed' });
 });
 
-// @desc    Public: browse approved shops directory
-// @route   GET /api/shops
-// @access  Public
 const getPublicShops = asyncHandler(async (req, res) => {
   const { search, category, verified, featured, sort, page = 1, limit = 12 } = req.query;
 
@@ -520,8 +479,6 @@ const getPublicShops = asyncHandler(async (req, res) => {
     Shop.countDocuments(filter),
   ]);
 
-  // Live "X products" count per shop, cheap at directory scale. If the shop
-  // count grows large, swap this for a $lookup in an aggregation pipeline.
   const counts = await Product.aggregate([
     { $match: { shop: { $in: shops.map((s) => s._id) }, status: 'active', isActive: true } },
     { $group: { _id: '$shop', count: { $sum: 1 } } },
@@ -536,8 +493,6 @@ const getPublicShops = asyncHandler(async (req, res) => {
     pages: Math.ceil(total / Number(limit)),
     shops: shops.map((s) => {
       const obj = { ...s.toObject(), productCount: countMap.get(String(s._id)) || 0 };
-      // Only pay the merge cost for shops actually using custom mode — 'basic'
-      // shops don't need a full theme object sent to the directory listing.
       if (obj.customizationMode === 'custom') obj.themeConfiguration = mergeWithDefaults(obj.themeConfiguration);
       else delete obj.themeConfiguration;
       return obj;
@@ -545,9 +500,6 @@ const getPublicShops = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Public: single approved shop by slug, for the shop storefront page
-// @route   GET /api/shops/:slug
-// @access  Public
 const getShopBySlug = asyncHandler(async (req, res) => {
   const shop = await Shop.findOne({
     slug: req.params.slug,
@@ -563,9 +515,6 @@ const getShopBySlug = asyncHandler(async (req, res) => {
   }
 
   const shopObj = shop.toObject();
-  // Always send a fully merged theme so the storefront renderer never has to
-  // special-case missing keys — it decides whether to USE it based on
-  // customizationMode, not based on whether the object is complete.
   shopObj.themeConfiguration = mergeWithDefaults(shopObj.themeConfiguration);
 
   res.json({ success: true, shop: shopObj });
@@ -576,6 +525,7 @@ module.exports = {
   createShop,
   getMyShop,
   updateMyShop,
+  uploadShopThemeImage, // NEW
   getPendingShops,
   approveShop,
   rejectShop,
