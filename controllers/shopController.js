@@ -9,6 +9,7 @@ const {
   shopSubmittedAdminTemplate,
   shopDecisionTemplate,
 } = require('../utils/emailTemplates');
+const { mergeWithDefaults, sanitizeIncomingTheme } = require('../utils/shopThemeDefaults');
 
 // ---------------------------------------------------------------------------
 // Shared helper — used by productController to silently attach a product to
@@ -20,16 +21,26 @@ async function getApprovedShopForSeller(sellerId) {
 
 // Safely parses themeConfiguration whether it arrived as a JSON string
 // (multipart/form-data always sends strings) or as a real object (plain
-// JSON requests, e.g. the Settings tab).
+// JSON requests, e.g. the Settings/Customize tabs), THEN runs it through
+// sanitizeIncomingTheme() so nothing malformed or oversized gets persisted.
 function parseThemeConfiguration(raw, fallback = {}) {
   if (raw === undefined || raw === null) return fallback;
-  if (typeof raw === 'object') return raw;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null ? parsed : fallback;
-  } catch {
-    return fallback;
+  let parsed;
+  if (typeof raw === 'object') {
+    parsed = raw;
+  } else {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
   }
+  if (typeof parsed !== 'object' || parsed === null) return fallback;
+  return sanitizeIncomingTheme(parsed);
+}
+
+function parseCustomizationMode(raw, fallback = 'basic') {
+  return raw === 'basic' || raw === 'custom' ? raw : fallback;
 }
 
 // Fires the "submitted for review" receipt to the seller and the
@@ -95,6 +106,7 @@ const createShop = asyncHandler(async (req, res) => {
   const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
   const safeLayout = ALLOWED_LAYOUTS.includes(homepageLayout) ? homepageLayout : 'default';
   const safeTheme = parseThemeConfiguration(req.body.themeConfiguration, {});
+  const safeMode = parseCustomizationMode(req.body.customizationMode, 'basic');
 
   const logo = req.files?.logo?.[0]?.path || '';
   const banner = req.files?.banner?.[0]?.path || '';
@@ -109,6 +121,7 @@ const createShop = asyncHandler(async (req, res) => {
     logo,
     banner,
     themeConfiguration: safeTheme,
+    customizationMode: safeMode,
     homepageLayout: safeLayout,
     status: 'pending_approval',
   });
@@ -139,7 +152,16 @@ const toggleMyShopActive = asyncHandler(async (req, res) => {
 // @access  Private (wholesaler, retailer)
 const getMyShop = asyncHandler(async (req, res) => {
   const shop = await Shop.findOne({ seller: req.user._id });
-  res.json({ success: true, shop: shop || null });
+  if (!shop) return res.json({ success: true, shop: null });
+
+  // The seller's own dashboard always sees the fully merged theme (with
+  // defaults filled in) regardless of customizationMode, so the customizer
+  // UI always has a complete object to edit — even on a shop that's never
+  // touched a theme field before.
+  const shopObj = shop.toObject();
+  shopObj.themeConfiguration = mergeWithDefaults(shopObj.themeConfiguration);
+
+  res.json({ success: true, shop: shopObj });
 });
 
 // @desc    Seller updates their own shop's basic info. Any update on an already
@@ -151,6 +173,12 @@ const getMyShop = asyncHandler(async (req, res) => {
 //          this request (req.files.logo / req.files.banner) — otherwise the
 //          existing Cloudinary URLs on the shop are left untouched, so the
 //          seller isn't forced to re-upload branding on every edit.
+//
+//          NOTE: changing customizationMode or themeConfiguration alone
+//          (i.e. the Customize tab) does NOT send an approved shop back to
+//          review — only shopName/description/businessCategory/businessHours/
+//          logo/banner changes trigger that, exactly as before this feature.
+//          Storefront design changes are the seller's own to publish freely.
 // @route   PUT /api/shops/my-shop
 // @access  Private (wholesaler, retailer)
 const updateMyShop = asyncHandler(async (req, res) => {
@@ -161,31 +189,49 @@ const updateMyShop = asyncHandler(async (req, res) => {
   }
 
   const editableFields = ['description', 'businessCategory', 'businessHours'];
-  editableFields.forEach((field) => {
-    if (req.body[field] !== undefined) shop[field] = req.body[field];
-  });
+  let reviewTriggeringChange = false;
 
-  if (req.body.themeConfiguration !== undefined) {
-    shop.themeConfiguration = parseThemeConfiguration(req.body.themeConfiguration, shop.themeConfiguration);
-  }
+  editableFields.forEach((field) => {
+    if (req.body[field] !== undefined && req.body[field] !== shop[field]) {
+      shop[field] = req.body[field];
+      reviewTriggeringChange = true;
+    }
+  });
 
   if (req.body.homepageLayout !== undefined) {
     const ALLOWED_LAYOUTS = ['default', 'banner-focus', 'grid-focus'];
     shop.homepageLayout = ALLOWED_LAYOUTS.includes(req.body.homepageLayout) ? req.body.homepageLayout : shop.homepageLayout;
   }
 
+  // --- Storefront customization (Customize tab) — never triggers re-review ---
+  if (req.body.customizationMode !== undefined) {
+    shop.customizationMode = parseCustomizationMode(req.body.customizationMode, shop.customizationMode);
+  }
+  if (req.body.themeConfiguration !== undefined) {
+    shop.themeConfiguration = parseThemeConfiguration(req.body.themeConfiguration, shop.themeConfiguration);
+  }
+
   // req.files comes from uploadShopImages (multer .fields), so each key is an
   // array — only overwrite logo/banner when a new file actually came through.
-  if (req.files?.logo?.[0]) shop.logo = req.files.logo[0].path;
-  if (req.files?.banner?.[0]) shop.banner = req.files.banner[0].path;
+  if (req.files?.logo?.[0]) {
+    shop.logo = req.files.logo[0].path;
+    reviewTriggeringChange = true;
+  }
+  if (req.files?.banner?.[0]) {
+    shop.banner = req.files.banner[0].path;
+    reviewTriggeringChange = true;
+  }
 
   if (req.body.shopName !== undefined && req.body.shopName.trim() && req.body.shopName.trim() !== shop.shopName) {
     shop.shopName = req.body.shopName.trim();
     shop.slug = await Shop.buildUniqueSlug(shop.shopName, shop._id);
+    reviewTriggeringChange = true;
   }
 
   const wasApproved = shop.status === 'approved';
-  if (wasApproved) {
+  const goesBackToReview = wasApproved && reviewTriggeringChange;
+
+  if (goesBackToReview) {
     shop.status = 'pending_approval';
     shop.reviewedBy = null;
     shop.reviewedAt = null;
@@ -194,12 +240,16 @@ const updateMyShop = asyncHandler(async (req, res) => {
   }
 
   await shop.save();
-  res.json({ success: true, shop });
+
+  const shopObj = shop.toObject();
+  shopObj.themeConfiguration = mergeWithDefaults(shopObj.themeConfiguration);
+  res.json({ success: true, shop: shopObj });
 
   // Only fire the submission emails when this edit actually pulled a
-  // previously-approved shop back into the review queue — routine edits to
-  // a shop that's still pending/rejected/suspended shouldn't spam anyone.
-  if (wasApproved) {
+  // previously-approved shop back into the review queue — routine
+  // design-only edits (or edits to a shop that's still pending/rejected/
+  // suspended) shouldn't spam anyone.
+  if (goesBackToReview) {
     sendShopSubmissionEmails({ sellerName: req.user.name, sellerEmail: req.user.email, shop });
   }
 });
@@ -403,6 +453,13 @@ const adminUpdateShop = asyncHandler(async (req, res) => {
     shop.isActive = req.body.isActive === true || req.body.isActive === 'true';
   }
 
+  if (req.body.customizationMode !== undefined) {
+    shop.customizationMode = parseCustomizationMode(req.body.customizationMode, shop.customizationMode);
+  }
+  if (req.body.themeConfiguration !== undefined) {
+    shop.themeConfiguration = parseThemeConfiguration(req.body.themeConfiguration, shop.themeConfiguration);
+  }
+
   if (req.body.shopName !== undefined && req.body.shopName.trim() && req.body.shopName.trim() !== shop.shopName) {
     shop.shopName = req.body.shopName.trim();
     shop.slug = await Shop.buildUniqueSlug(shop.shopName, shop._id);
@@ -454,7 +511,9 @@ const getPublicShops = asyncHandler(async (req, res) => {
 
   const [shops, total] = await Promise.all([
     Shop.find(filter)
-      .select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt ratingsAverage ratingsCount')
+      .select(
+        'shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt ratingsAverage ratingsCount customizationMode themeConfiguration'
+      )
       .sort(sortMap[sort] || sortMap.featured)
       .skip(skip)
       .limit(Number(limit)),
@@ -475,7 +534,14 @@ const getPublicShops = asyncHandler(async (req, res) => {
     total,
     page: Number(page),
     pages: Math.ceil(total / Number(limit)),
-    shops: shops.map((s) => ({ ...s.toObject(), productCount: countMap.get(String(s._id)) || 0 })),
+    shops: shops.map((s) => {
+      const obj = { ...s.toObject(), productCount: countMap.get(String(s._id)) || 0 };
+      // Only pay the merge cost for shops actually using custom mode — 'basic'
+      // shops don't need a full theme object sent to the directory listing.
+      if (obj.customizationMode === 'custom') obj.themeConfiguration = mergeWithDefaults(obj.themeConfiguration);
+      else delete obj.themeConfiguration;
+      return obj;
+    }),
   });
 });
 
@@ -487,14 +553,22 @@ const getShopBySlug = asyncHandler(async (req, res) => {
     slug: req.params.slug,
     status: 'approved',
     isActive: true,
-  }).select('shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt ratingsAverage ratingsCount');
+  }).select(
+    'shopName slug logo banner description businessCategory businessHours verificationStatus isFeatured createdAt ratingsAverage ratingsCount customizationMode themeConfiguration'
+  );
 
   if (!shop) {
     res.status(404);
     throw new Error('Shop not found');
   }
 
-  res.json({ success: true, shop });
+  const shopObj = shop.toObject();
+  // Always send a fully merged theme so the storefront renderer never has to
+  // special-case missing keys — it decides whether to USE it based on
+  // customizationMode, not based on whether the object is complete.
+  shopObj.themeConfiguration = mergeWithDefaults(shopObj.themeConfiguration);
+
+  res.json({ success: true, shop: shopObj });
 });
 
 module.exports = {

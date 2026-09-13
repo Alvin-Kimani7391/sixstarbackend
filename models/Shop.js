@@ -2,16 +2,20 @@ const mongoose = require('mongoose');
 const { Schema } = mongoose;
 
 // ---------------------------------------------------------------------------
-// Minimal Shop model — just enough for:
-//   1. A seller to create one shop (optional)
-//   2. Admin to approve/reject/suspend/reactivate/verify/feature it
-//   3. Product creation to silently attach an approved shop's id to new products
-//   4. Buyers to rate/review the shop (ShopReview model recalculates
-//      ratingsAverage/ratingsCount below)
+// Shop model — a seller's optional shop, now with full storefront
+// customization support via `customizationMode` + `themeConfiguration`.
 //
-// Branding/customization fields (theme, banners, layout, collections, policies,
-// etc. from the full spec) are intentionally left minimal for now and can be
-// expanded later without breaking anything here.
+//   customizationMode: 'basic'  -> storefront renders the original fixed
+//                                  passport/banner layout (no theme applied,
+//                                  identical to how shops rendered before
+//                                  this feature existed).
+//                       'custom' -> storefront renders entirely from
+//                                  themeConfiguration (header, hero, product
+//                                  grid, arrangeable sections, footer — see
+//                                  utils/shopThemeDefaults.js for the shape).
+//
+// Sellers can flip between the two any time without losing their saved
+// theme — 'basic' just means the theme isn't applied right now.
 // ---------------------------------------------------------------------------
 
 function slugify(str) {
@@ -39,9 +43,14 @@ const shopSchema = new Schema(
     businessCategory: { type: String, default: '' },
     businessHours: { type: String, default: '' },
 
-    // Reserved for later customization work (colors, layout, etc.)
+    // --- Storefront customization ---
+    customizationMode: {
+      type: String,
+      enum: ['basic', 'custom'],
+      default: 'basic',
+    },
     themeConfiguration: { type: Schema.Types.Mixed, default: {} },
-    homepageLayout: { type: String, default: 'default' },
+    homepageLayout: { type: String, default: 'default' }, // legacy field, kept for back-compat
 
     // --- Approval workflow ---
     status: {
@@ -90,8 +99,6 @@ shopSchema.statics.buildUniqueSlug = async function (shopName, excludeId = null)
   }
 };
 
-// Helpful indexes for the admin table's status/search filters and the
-// public shop directory's featured/verified filters.
 shopSchema.index({ status: 1, isActive: 1 });
 shopSchema.index({ shopName: 'text' });
 
